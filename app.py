@@ -1,3 +1,7 @@
+# تطبيق monkey patch في بداية الملف قبل أي استيرادات أخرى
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import json
 import uuid
@@ -20,11 +24,11 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder='.')
 app.secret_key = os.environ.get("SESSION_SECRET", os.urandom(24))
 
-# إعداد SocketIO
+# إعداد SocketIO مع async_mode='eventlet'
 socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
-    async_mode='threading',
+    async_mode='eventlet',
     ping_timeout=60, 
     ping_interval=30,
     logger=False, 
@@ -1098,11 +1102,12 @@ def api_admin_stop_user(user_id):
 load_all_sessions()
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting enhanced Telegram automation system...")
-    socketio.run(
-        app, 
-        host="0.0.0.0", 
-        port=5000, 
-        debug=False,
-        use_reloader=False
-        )
+    with app.app_context():
+        logger.info("🚀 Starting enhanced Telegram automation system...")
+        socketio.run(
+            app, 
+            host="0.0.0.0", 
+            port=5000, 
+            debug=False,
+            use_reloader=False
+)
