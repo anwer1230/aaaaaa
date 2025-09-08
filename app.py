@@ -39,14 +39,15 @@ socketio = SocketIO(
 SESSIONS_DIR = "sessions"
 if not os.path.exists(SESSIONS_DIR):
     os.makedirs(SESSIONS_DIR)
+    logger.info(f"Created sessions directory: {SESSIONS_DIR}")
 
 USERS = {}
 USERS_LOCK = Lock()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 # بيانات Telegram API
-API_ID = os.environ.get('TELEGRAM_API_ID')
-API_HASH = os.environ.get('TELEGRAM_API_HASH')
+API_ID = os.environ.get('TELEGRAM_API_ID', '123456')
+API_HASH = os.environ.get('TELEGRAM_API_HASH', 'abcdef123456')
 
 if not API_ID or not API_HASH:
     logger.error("❌ يجب إضافة TELEGRAM_API_ID و TELEGRAM_API_HASH في متغيرات البيئة")
@@ -82,36 +83,53 @@ def load_all_sessions():
     logger.info("Loading existing sessions...")
     session_count = 0
 
-    with USERS_LOCK:
-        try:
+    try:
+        # إنشاء مجلد الجلسات إذا لم يكن موجودًا
+        if not os.path.exists(SESSIONS_DIR):
+            os.makedirs(SESSIONS_DIR)
+            logger.info(f"Created sessions directory: {SESSIONS_DIR}")
+            return 0
+
+        with USERS_LOCK:
             for filename in os.listdir(SESSIONS_DIR):
-                if filename.endswith('.json'):
-                    user_id = filename.split('.')[0]
-                    settings = load_settings(user_id)
+                if filename.endswith('.session'):
+                    user_id = filename.replace('_session.session', '')
+                    try:
+                        # تحميل الجلسة من ملف session
+                        session_file = os.path.join(SESSIONS_DIR, filename)
+                        with open(session_file, 'r') as f:
+                            session_string = f.read().strip()
+                        
+                        if session_string:
+                            settings = load_settings(user_id)
+                            if not settings:
+                                settings = {'phone': 'مخزن مسبقاً'}
+                            
+                            USERS[user_id] = {
+                                'client': None,
+                                'settings': settings,
+                                'thread': None,
+                                'is_running': False,
+                                'stats': {"sent": 0, "errors": 0},
+                                'connected': False,
+                                'authenticated': True,  # تم المصادقة مسبقاً
+                                'awaiting_code': False,
+                                'awaiting_password': False,
+                                'phone_code_hash': None,
+                                'loop': None,
+                                'client_thread': None,
+                                'last_scheduled_send': 0,
+                                'monitoring_active': False,
+                                'message_handler': None,
+                                'session_string': session_string
+                            }
+                            session_count += 1
+                            logger.info(f"✓ Loaded session for {user_id}")
+                    except Exception as e:
+                        logger.error(f"Error loading session file {filename}: {str(e)}")
 
-                    if settings and 'phone' in settings:
-                        USERS[user_id] = {
-                            'client': None,
-                            'settings': settings,
-                            'thread': None,
-                            'is_running': False,
-                            'stats': {"sent": 0, "errors": 0},
-                            'connected': False,
-                            'authenticated': False,
-                            'awaiting_code': False,
-                            'awaiting_password': False,
-                            'phone_code_hash': None,
-                            'loop': None,
-                            'client_thread': None,
-                            'last_scheduled_send': 0,
-                            'monitoring_active': False,
-                            'message_handler': None
-                        }
-                        session_count += 1
-                        logger.info(f"✓ Loaded session for {user_id}")
-
-        except Exception as e:
-            logger.error(f"Error loading sessions: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error loading sessions: {str(e)}")
 
     logger.info(f"Loaded {session_count} sessions successfully")
     return session_count
@@ -130,28 +148,33 @@ class TelegramClientManager:
         self.stop_flag = threading.Event()
         self.is_ready = threading.Event()
 
-    def start_client_thread(self):
+    def start_client_thread(self, session_string=None):
         """بدء thread منفصل للعميل"""
         if self.thread and self.thread.is_alive():
             return
 
         self.stop_flag.clear()
         self.is_ready.clear()
-        self.thread = threading.Thread(target=self._run_client_loop, daemon=True)
+        self.thread = threading.Thread(target=self._run_client_loop, daemon=True, args=(session_string,))
         self.thread.start()
 
         # انتظار حتى يصبح العميل جاهزاً
         if not self.is_ready.wait(timeout=30):
             raise Exception("Client initialization timeout")
 
-    def _run_client_loop(self):
+    def _run_client_loop(self, session_string=None):
         """تشغيل event loop للعميل"""
         try:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
-            session_file = os.path.join(SESSIONS_DIR, f"{self.user_id}_session.session")
-            self.client = TelegramClient(StringSession(), int(API_ID), API_HASH, loop=self.loop)
+            # استخدام جلسة سابقة إذا كانت متاحة
+            if session_string:
+                session = StringSession(session_string)
+            else:
+                session = StringSession()
+                
+            self.client = TelegramClient(session, int(API_ID), API_HASH, loop=self.loop)
 
             self.loop.run_until_complete(self._client_main())
 
@@ -218,7 +241,14 @@ class TelegramManager:
                 }
 
             client_manager = self.get_client_manager(user_id)
-            client_manager.start_client_thread()
+            
+            # التحقق إذا كانت هناك جلسة مخزنة مسبقاً
+            session_string = None
+            with USERS_LOCK:
+                if user_id in USERS and 'session_string' in USERS[user_id]:
+                    session_string = USERS[user_id]['session_string']
+            
+            client_manager.start_client_thread(session_string)
 
             # الانتظار حتى يكون العميل جاهزاً
             if not client_manager.is_ready.wait(timeout=30):
@@ -765,7 +795,7 @@ def api_verify_code():
         else:
             error_message = result.get('message', 'فشل التحقق')
             socketio.emit('log_update', {
-                "message": f"❌ {error_message}" 
+                "message": f"❌ {error_message}"
             }, to=user_id)
 
             return jsonify({
@@ -1139,4 +1169,4 @@ if __name__ == "__main__":
             port=5000, 
             debug=True,
             use_reloader=False
-        )
+    )
