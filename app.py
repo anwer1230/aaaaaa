@@ -31,8 +31,8 @@ socketio = SocketIO(
     async_mode='eventlet',
     ping_timeout=60, 
     ping_interval=30,
-    logger=False, 
-    engineio_logger=False
+    logger=True,
+    engineio_logger=True
 )
 
 # إعدادات النظام
@@ -151,12 +151,13 @@ class TelegramClientManager:
             asyncio.set_event_loop(self.loop)
 
             session_file = os.path.join(SESSIONS_DIR, f"{self.user_id}_session.session")
-            self.client = TelegramClient(session_file, int(API_ID), API_HASH)
+            self.client = TelegramClient(StringSession(), int(API_ID), API_HASH, loop=self.loop)
 
             self.loop.run_until_complete(self._client_main())
 
         except Exception as e:
             logger.error(f"Client thread error for {self.user_id}: {str(e)}")
+            self.is_ready.set()  # تأكد من أن is_ready مضبوط حتى في حالة الخطأ
         finally:
             if self.loop:
                 self.loop.close()
@@ -166,6 +167,7 @@ class TelegramClientManager:
         try:
             await self.client.connect()
             self.is_ready.set()
+            logger.info(f"Client connected for user {self.user_id}")
 
             while not self.stop_flag.is_set():
                 await asyncio.sleep(1)
@@ -173,12 +175,13 @@ class TelegramClientManager:
         except Exception as e:
             logger.error(f"Client main error: {str(e)}")
         finally:
-            await self.client.disconnect()
+            if self.client:
+                await self.client.disconnect()
 
     def run_coroutine(self, coro):
         """تشغيل coroutine في event loop الخاص بالعميل"""
-        if not self.loop:
-            raise Exception("Event loop not initialized")
+        if not self.loop or not self.is_ready.is_set():
+            raise Exception("Event loop not initialized or client not ready")
 
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return future.result(timeout=30)
@@ -208,6 +211,7 @@ class TelegramManager:
         """إعداد عميل التليجرام"""
         try:
             if not API_ID or not API_HASH:
+                logger.error("API_ID or API_HASH not set")
                 return {
                     "status": "error", 
                     "message": "❌ بيانات API غير متوفرة"
@@ -216,25 +220,49 @@ class TelegramManager:
             client_manager = self.get_client_manager(user_id)
             client_manager.start_client_thread()
 
-            is_authorized = client_manager.run_coroutine(
-                client_manager.client.is_user_authorized()
-            )
+            # الانتظار حتى يكون العميل جاهزاً
+            if not client_manager.is_ready.wait(timeout=30):
+                return {
+                    "status": "error", 
+                    "message": "❌ انتهت مهلة الاتصال بالتليجرام"
+                }
+
+            is_authorized = False
+            try:
+                is_authorized = client_manager.run_coroutine(
+                    client_manager.client.is_user_authorized()
+                )
+            except Exception as e:
+                logger.error(f"Authorization check error: {str(e)}")
+                return {
+                    "status": "error", 
+                    "message": f"❌ خطأ في التحقق من الصلاحية: {str(e)}"
+                }
 
             if not is_authorized:
-                sent = client_manager.run_coroutine(
-                    client_manager.client.send_code_request(phone_number)
-                )
+                try:
+                    sent = client_manager.run_coroutine(
+                        client_manager.client.send_code_request(phone_number)
+                    )
+                    logger.info(f"Verification code sent to {phone_number}")
 
-                with USERS_LOCK:
-                    if user_id in USERS:
-                        USERS[user_id]['awaiting_code'] = True
-                        USERS[user_id]['phone_code_hash'] = sent.phone_code_hash
-                        USERS[user_id]['client_manager'] = client_manager
+                    with USERS_LOCK:
+                        if user_id in USERS:
+                            USERS[user_id]['awaiting_code'] = True
+                            USERS[user_id]['phone_code_hash'] = sent.phone_code_hash
+                            USERS[user_id]['client_manager'] = client_manager
 
-                return {
-                    "status": "code_required", 
-                    "message": "📱 تم إرسال كود التحقق"
-                }
+                    return {
+                        "status": "code_required", 
+                        "message": "📱 تم إرسال كود التحقق"
+                    }
+
+                except Exception as e:
+                    logger.error(f"Send code error: {str(e)}")
+                    return {
+                        "status": "error", 
+                        "message": f"❌ فشل إرسال كود التحقق: {str(e)}"
+                    }
             else:
                 with USERS_LOCK:
                     if user_id in USERS:
@@ -263,8 +291,9 @@ class TelegramManager:
                 return {"status": "error", "message": "❌ بيانات الجلسة مفقودة"}
 
             try:
+                # استخدام sign_in بدلاً من sign_in
                 user = client_manager.run_coroutine(
-                    client_manager.client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+                    client_manager.client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
                 )
 
                 with USERS_LOCK:
@@ -272,6 +301,14 @@ class TelegramManager:
                     USERS[user_id]['authenticated'] = True
                     USERS[user_id]['awaiting_code'] = False
                     USERS[user_id]['awaiting_password'] = False
+
+                # حفظ جلسة التسجيل
+                session_string = client_manager.run_coroutine(
+                    client_manager.client.session.save()
+                )
+                session_file = os.path.join(SESSIONS_DIR, f"{user_id}_session.session")
+                with open(session_file, "w") as f:
+                    f.write(session_string)
 
                 return {"status": "success", "message": "✅ تم التحقق بنجاح"}
 
@@ -306,6 +343,7 @@ class TelegramManager:
                 return {"status": "error", "message": "❌ بيانات الجلسة مفقودة"}
 
             try:
+                # استخدام كلمة المرور للتسجيل
                 await_result = client_manager.run_coroutine(
                     client_manager.client.sign_in(password=password)
                 )
@@ -315,6 +353,14 @@ class TelegramManager:
                     USERS[user_id]['authenticated'] = True
                     USERS[user_id]['awaiting_password'] = False
 
+                # حفظ جلسة التسجيل
+                session_string = client_manager.run_coroutine(
+                    client_manager.client.session.save()
+                )
+                session_file = os.path.join(SESSIONS_DIR, f"{user_id}_session.session")
+                with open(session_file, "w") as f:
+                    f.write(session_string)
+
                 return {"status": "success", "message": "✅ تم التحقق بنجاح"}
 
             except PasswordHashInvalidError:
@@ -323,46 +369,6 @@ class TelegramManager:
         except Exception as e:
             logger.error(f"Password verification error: {str(e)}")
             return {"status": "error", "message": f"❌ خطأ: {str(e)}"}
-
-    def send_message_async(self, user_id, entity, message):
-        """إرسال رسالة"""
-        try:
-            with USERS_LOCK:
-                if user_id not in USERS:
-                    raise Exception("المستخدم غير موجود")
-
-                client_manager = USERS[user_id].get('client_manager')
-
-            if not client_manager:
-                raise Exception("العميل غير متصل")
-
-            is_authorized = client_manager.run_coroutine(
-                client_manager.client.is_user_authorized()
-            )
-
-            if not is_authorized:
-                raise Exception("العميل غير مصرح")
-
-            try:
-                entity_obj = client_manager.run_coroutine(
-                    client_manager.client.get_entity(entity)
-                )
-            except:
-                if not entity.startswith('@') and not entity.startswith('https://'):
-                    entity = '@' + entity
-                entity_obj = client_manager.run_coroutine(
-                    client_manager.client.get_entity(entity)
-                )
-
-            result = client_manager.run_coroutine(
-                client_manager.client.send_message(entity_obj, message)
-            )
-
-            return {"success": True, "message_id": result.id}
-
-        except Exception as e:
-            logger.error(f"Send message error: {str(e)}")
-            raise Exception(str(e))
 
 # إنشاء مدير التليجرام
 telegram_manager = TelegramManager()
@@ -516,8 +522,14 @@ def handle_connect():
                     "status": "connected" if connected else "disconnected"
                 })
 
+        # إرسال رسالة ترحيب إلى وحدة التحكم
         emit('console_log', {
             "message": f"[{time.strftime('%H:%M:%S')}] INFO: Socket connected"
+        })
+        
+        # إرسال رسالة ترحيب إلى سجل النشاط
+        emit('log_update', {
+            "message": f"[{time.strftime('%H:%M:%S')}] تم الاتصال بالخادم"
         })
 
 @socketio.on('disconnect')
@@ -526,6 +538,11 @@ def handle_disconnect():
         user_id = session['user_id']
         leave_room(user_id)
         logger.info(f"User {user_id} disconnected from socket")
+        
+        # إرسال رسالة انفصال إلى سجل النشاط
+        emit('log_update', {
+            "message": f"[{time.strftime('%H:%M:%S')}] تم قطع الاتصال بالخادم"
+        }, to=user_id)
 
 # ===========================
 # المسارات الأساسية
@@ -546,7 +563,7 @@ def index():
             connection_status = "connected" if connected else "disconnected"
 
     # إضافة عنوان التطبيق
-    app_title = "مركز سرعة انجاز 📚للخدمات الطلابية والاكاديمية"
+    app_title = "مركز سرعة انجاز"
     whatsapp_link = "https://wa.me/+966510349663"
 
     return render_template('index.html', 
@@ -596,19 +613,29 @@ def api_save_login():
     user_id = session['user_id']
     data = request.json
 
+    logger.info(f"Received login request from user {user_id}: {data}")
+
     if not data or not data.get('phone'):
+        logger.warning("No phone number provided")
         return jsonify({
             "success": False, 
             "message": "❌ يرجى إدخال رقم الهاتف"
         })
 
+    phone_number = data.get('phone')
+    password = data.get('password', '')
+
+    # تنظيف رقم الهاتف (إزالة أي مسافات أو أحرف غير رقمية)
+    phone_number = ''.join(filter(str.isdigit, phone_number))
+
     settings = {
-        'phone': data.get('phone'),
-        'password': data.get('password', ''),
+        'phone': phone_number,
+        'password': password,
         'login_time': time.time()
     }
 
     if not save_settings(user_id, settings):
+        logger.error("Failed to save settings")
         return jsonify({
             "success": False, 
             "message": "❌ فشل في حفظ البيانات"
@@ -637,7 +664,8 @@ def api_save_login():
                 'message_handler': None
             }
 
-        result = telegram_manager.setup_client(user_id, settings['phone'])
+        result = telegram_manager.setup_client(user_id, phone_number)
+        logger.info(f"Login result for {user_id}: {result}")
 
         if result["status"] == "success":
             socketio.emit('log_update', {
@@ -666,6 +694,7 @@ def api_save_login():
 
         else:
             error_message = result.get('message', 'خطأ غير معروف')
+            logger.error(f"Login error: {error_message}")
             socketio.emit('log_update', {
                 "message": f"❌ {error_message}"
             }, to=user_id)
@@ -736,7 +765,7 @@ def api_verify_code():
         else:
             error_message = result.get('message', 'فشل التحقق')
             socketio.emit('log_update', {
-                "message": f"❌ {error_message}"
+                "message": f"❌ {error_message}
             }, to=user_id)
 
             return jsonify({
@@ -1108,6 +1137,6 @@ if __name__ == "__main__":
             app, 
             host="0.0.0.0", 
             port=5000, 
-            debug=False,
+            debug=True,
             use_reloader=False
-)
+        )
