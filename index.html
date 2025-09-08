@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مركز سرعة انجاز للخدمات الطلابية والأكاديمية</title>
+
+    <!-- PWA Meta Tags -->
+    <meta name="theme-color" content="#007bff">
+    <meta name="description" content="مركز سرعة انجاز للخدمات الطلابية والأكاديمية - نظام التليجرام التلقائي">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="مركز سرعة انجاز">
+
+    <!-- Icons -->
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192x192.png">
+    <link rel="apple-touch-icon" href="/static/icon-192x192.png">
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+
+    <style>
+        .header-title {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
+        }
+        .whatsapp-link {
+            color: #25D366;
+            text-decoration: none;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        .whatsapp-link:hover {
+            color: #128C7E;
+            transform: scale(1.05);
+        }
+        .log-container {
+            height: 300px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 10px;
+        }
+        .console-container {
+            height: 250px;
+            overflow-y: auto;
+            background: #212529;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 10px;
+            color: #28a745;
+            font-family: 'Courier New', monospace;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 3px;
+        }
+        .log-success {
+            background: #d1e7dd;
+            color: #0f5132;
+        }
+        .log-error {
+            background: #f8d7da;
+            color: #842029;
+        }
+        .log-warning {
+            background: #fff3cd;
+            color: #664d03;
+        }
+        .log-info {
+            background: #cff4fc;
+            color: #055160;
+        }
+        .log-time {
+            font-weight: bold;
+            margin-right: 5px;
+        }
+        .console-line {
+            margin-bottom: 2px;
+            font-size: 12px;
+        }
+        .monitoring-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+        }
+
+        /* تحسين الشكل للجوال */
+        @media (max-width: 768px) {
+            .container-fluid {
+                padding: 10px;
+            }
+            .card-body {
+                padding: 15px;
+            }
+            .log-container, .console-container {
+                height: 200px;
+            }
+            .header-title {
+                padding: 20px;
+            }
+            .header-title h2 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid mt-4">
+        <!-- مساحة للتنبيهات -->
+        <div id="alertContainer"></div>
+
+        <!-- مؤشر حالة المراقبة -->
+        <div class="monitoring-status">
+            <span id="monitoringIndicator" class="badge bg-secondary">
+                <i class="fas fa-circle"></i> غير نشط
+            </span>
+        </div>
+
+        <!-- العنوان الرئيسي الجديد -->
+        <div class="header-title">
+            <h2 class="mb-3">
+                <i class="fas fa-graduation-cap me-2"></i>
+                📚 تصميم وتنفيذ مركز سرعة انجاز
+            </h2>
+            <h4 class="mb-3">للخدمات الطلابية والأكاديمية</h4>
+            <p class="mb-2">
+                <i class="fab fa-whatsapp me-2"></i>
+                واتساب: 
+                <a href="https://wa.me/+966510349663" class="whatsapp-link" target="_blank">
+                    +966510349663
+                </a>
+            </p>
+            <div class="mt-3">
+                <small id="connectionStatus" class="badge bg-secondary">
+                    {% if connection_status == 'connected' %}
+                        <i class="fas fa-circle text-success"></i> متصل
+                    {% else %}
+                        <i class="fas fa-circle text-danger"></i> غير متصل
+                    {% endif %}
+                </small>
+            </div>
+        </div>
+
+        <div class="row">
+            <!-- لوحة تسجيل الدخول -->
+            <div class="col-lg-6 mb-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white text-center">
+                        <h2 class="mb-1">
+                            <i class="fas fa-telegram-plane me-2"></i>
+                            تصميم وتنفيذ مركز سرعة انجاز 📚
+                        </h2>
+                        <h5 class="mb-2">للخدمات الطلابية والاكاديمية</h5>
+                        <p class="mb-2">
+                            <a href="https://wa.me/+966510349663" target="_blank" class="text-white text-decoration-none">
+                                <i class="fab fa-whatsapp me-1"></i>
+                                +966510349663
+                            </a>
+                        </p>
+                        <small id="connectionStatus" class="badge bg-secondary">
+                            {% if connection_status == 'connected' %}
+                                <i class="fas fa-circle text-success"></i> متصل
+                            {% else %}
+                                <i class="fas fa-circle text-danger"></i> غير متصل
+                            {% endif %}
+                        </small>
+                    </div>
+                    <div class="card-body">
+                        <form id="loginForm">
+                            <div class="mb-3">
+                                <label for="phone" class="form-label">رقم الهاتف</label>
+                                <input type="tel" class="form-control" id="phone" 
+                                       placeholder="+966xxxxxxxxx" 
+                                       value="{{ settings.phone or '' }}"
+                                       required>
+                                <div class="form-text">أدخل رقم الهاتف مع رمز الدولة</div>
+                            </div>
+
+                            <div class="mb-3" id="passwordDiv" style="display: none;">
+                                <label for="password" class="form-label">كلمة مرور التليجرام (اختيارية)</label>
+                                <input type="password" class="form-control" id="password" 
+                                       placeholder="كلمة المرور للتحقق الثنائي">
+                            </div>
+
+                            <div class="row">
+                                <div class="col-md-6 mb-2">
+                                    <button type="submit" class="btn btn-primary w-100" id="loginBtn">
+                                        <i class="fas fa-sign-in-alt me-2"></i>
+                                        تسجيل الدخول
+                                    </button>
+                                </div>
+                                <div class="col-md-3 mb-2">
+                                    <button type="button" class="btn btn-warning w-100" id="resetBtn" style="display: none;">
+                                        <i class="fas fa-redo me-1"></i>
+                                        إعادة تعيين
+                                    </button>
+                                </div>
+                                <div class="col-md-3 mb-2">
+                                    <button type="button" class="btn btn-danger w-100" id="logoutBtn" style="display: none;">
+                                        <i class="fas fa-sign-out-alt me-1"></i>
+                                        خروج
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+
+                        <!-- نموذج التحقق من الكود -->
+                        <div id="codeVerification" style="display: none;">
+                            <hr>
+                            <h6>التحقق من الهوية</h6>
+                            <div class="mb-3">
+                                <label for="verificationCode" class="form-label">كود التحقق</label>
+                                <input type="text" class="form-control" id="verificationCode" 
+                                       placeholder="أدخل الكود المرسل إلى هاتفك">
+                            </div>
+                            <div class="mb-3" id="passwordVerificationDiv" style="display: none;">
+                                <label for="passwordVerification" class="form-label">كلمة مرور التليجرام</label>
+                                <input type="password" class="form-control" id="passwordVerification" 
+                                       placeholder="أدخل كلمة مرور حسابك">
+                            </div>
+                            <button type="button" class="btn btn-success" id="verifyBtn">
+                                <i class="fas fa-check me-2"></i>
+                                تأكيد
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- لوحة الإعدادات -->
+            <div class="col-lg-6 mb-4">
+                <div class="card">
+                    <div class="card-header bg-success text-white">
+                        <h5 class="mb-0">
+                            <i class="fas fa-cog me-2"></i>
+                            إعدادات الإرسال
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <form id="settingsForm">
+                            <div class="mb-3">
+                                <label for="message" class="form-label">الرسالة</label>
+                                <textarea class="form-control" id="message" rows="4" 
+                                          placeholder="اكتب الرسالة التي تريد إرسالها">{{ settings.message or '' }}</textarea>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="groups" class="form-label">المجموعات</label>
+                                <textarea class="form-control" id="groups" rows="4" 
+                                          placeholder="@group1&#10;@group2&#10;@group3">{% if settings.groups %}{{ '\n'.join(settings.groups) }}{% endif %}</textarea>
+                                <div class="form-text">أدخل كل مجموعة في سطر منفصل</div>
+                            </div>
+
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="sendType" class="form-label">نوع الإرسال</label>
+                                    <select class="form-select" id="sendType">
+                                        <option value="keyword_monitoring" {{ 'selected' if settings.send_type == 'keyword_monitoring' else '' }}>مراقبة فورية</option>
+                                        <option value="scheduled" {{ 'selected' if settings.send_type == 'scheduled' else '' }}>مجدول</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-6 mb-3">
+                                    <label for="intervalSeconds" class="form-label">الفترة الزمنية (ثانية)</label>
+                                    <input type="number" class="form-control" id="intervalSeconds" 
+                                           value="{{ settings.interval_seconds or 3600 }}" min="60">
+                                    <div class="form-text">للإرسال المجدول فقط</div>
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="watchWords" class="form-label">الكلمات المراقبة</label>
+                                <textarea class="form-control" id="watchWords" rows="3" 
+                                          placeholder="كلمة1&#10;كلمة2&#10;كلمة3">{% if settings.watch_words %}{{ '\n'.join(settings.watch_words) }}{% endif %}</textarea>
+                                <div class="form-text">أدخل كل كلمة في سطر منفصل (للمراقبة التلقائية)</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="autoReconnect"
+                                           {{ 'checked' if settings.auto_reconnect else '' }}>
+                                    <label class="form-check-label" for="autoReconnect">
+                                        إعادة الاتصال التلقائي
+                                    </label>
+                                </div>
+                            </div>
+
+                            <button type="submit" class="btn btn-success">
+                                <i class="fas fa-save me-2"></i>
+                                حفظ الإعدادات
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- لوحة التحكم -->
+        <div class="row">
+            <div class="col-lg-8 mb-4">
+                <div class="card">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0">
+                            <i class="fas fa-play-circle me-2"></i>
+                            التحكم في النظام
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3 mb-2">
+                                <button class="btn btn-success w-100" id="startBtn">
+                                    <i class="fas fa-play me-2"></i>
+                                    بدء المراقبة الفورية
+                                </button>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <button class="btn btn-danger w-100" id="stopBtn" style="display: none;">
+                                    <i class="fas fa-stop me-2"></i>
+                                    إيقاف المراقبة
+                                </button>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <button class="btn btn-warning w-100" id="sendNowBtn">
+                                    <i class="fas fa-paper-plane me-2"></i>
+                                    إرسال فوري
+                                </button>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <button class="btn btn-info w-100" id="autoSendBtn">
+                                    <i class="fas fa-robot me-2"></i>
+                                    إرسال تلقائي
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- لوحة الإحصائيات -->
+            <div class="col-lg-4 mb-4">
+                <div class="card">
+                    <div class="card-header bg-secondary text-white">
+                        <h5 class="mb-0">
+                            <i class="fas fa-chart-bar me-2"></i>
+                            الإحصائيات
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row text-center">
+                            <div class="col-6">
+                                <div class="border-end">
+                                    <h3 id="sentCount" class="text-success">0</h3>
+                                    <small>تم الإرسال</small>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <h3 id="errorCount" class="text-danger">0</h3>
+                                <small>الأخطاء</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- سجل النشاط -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between">
+                        <h5 class="mb-0">
+                            <i class="fas fa-list-alt me-2"></i>
+                            سجل النشاط
+                        </h5>
+                        <button class="btn btn-sm btn-outline-light" id="clearLogsBtn">
+                            <i class="fas fa-trash me-1"></i>
+                            مسح السجل
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div id="logContainer" class="log-container">
+                            <div class="text-muted">لا توجد رسائل حتى الآن...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- وحدة التحكم -->
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-warning text-dark d-flex justify-content-between">
+                        <h5 class="mb-0">
+                            <i class="fas fa-terminal me-2"></i>
+                            وحدة التحكم
+                        </h5>
+                        <button class="btn btn-sm btn-outline-dark" id="clearConsoleBtn">
+                            <i class="fas fa-broom me-1"></i>
+                            مسح الوحدة
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div id="consoleContainer" class="console-container">
+                            <div class="text-muted">Console ready...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- معلومات التطبيق المحمول -->
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0">
+                            <i class="fas fa-mobile-alt me-2"></i>
+                            تحميل التطبيق المحمول
+                        </h5>
+                    </div>
+                    <div class="card-body text-center">
+                        <p>يمكنك إضافة هذا النظام إلى شاشتك الرئيسية كتطبيق</p>
+                        <div class="row">
+                            <div class="col-md-6 mb-2">
+                                <button class="btn btn-success w-100" id="installBtn" style="display: none;">
+                                    <i class="fas fa-download me-2"></i>
+                                    تثبيت التطبيق
+                                </button>
+                            </div>
+                            <div class="col-md-6 mb-2">
+                                <small class="text-muted">
+                                    للأندرويد: استخدم Chrome وانقر "إضافة إلى الشاشة الرئيسية"<br>
+                                    لآيفون: استخدم Safari وانقر مشاركة ← إضافة إلى الشاشة الرئيسية
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+        <div id="toast" class="toast align-items-center text-white bg-primary" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body" id="toastBody">
+
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+
+    <!-- PWA Script -->
+    <script>
+        // PWA Install
+        let deferredPrompt;
+        const installBtn = document.getElementById('installBtn');
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            installBtn.style.display = 'block';
+        });
+
+        installBtn.addEventListener('click', async () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    console.log('App installed');
+                }
+                deferredPrompt = null;
+                installBtn.style.display = 'none';
+            }
+        });
+
+        // Register Service Worker
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/static/sw.js')
+                    .then((registration) => {
+                        console.log('SW registered: ', registration);
+                    })
+                    .catch((registrationError) => {
+                        console.log('SW registration failed: ', registrationError);
+                    });
+            });
+        }
+    </script>
+</body>
+</html>
