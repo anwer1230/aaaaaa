@@ -6,19 +6,18 @@ import logging
 import asyncio
 import threading
 from threading import Lock
-from flask import Flask, session, request, render_template, jsonify, redirect, render_template_string
+from flask import Flask, session, request, render_template, jsonify, redirect
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError, PasswordHashInvalidError
 from telethon.sessions import StringSession
-from telethon.tl.types import Message
 
 # تكوين السجلات
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# إنشاء التطبيق
-app = Flask(__name__)
+# إنشاء التطبيق مع تغيير مسار القوالب إلى المجلد الرئيسي
+app = Flask(__name__, template_folder='.')
 app.secret_key = os.environ.get("SESSION_SECRET", os.urandom(24))
 
 # إعداد SocketIO
@@ -49,1101 +48,1061 @@ if not API_ID or not API_HASH:
     logger.error("❌ يجب إضافة TELEGRAM_API_ID و TELEGRAM_API_HASH في متغيرات البيئة")
 
 # ===========================
-# قوالب HTML
+# إدارة الجلسات والإعدادات
 # ===========================
+def save_settings(user_id, settings):
+    """حفظ إعدادات المستخدم"""
+    try:
+        path = os.path.join(SESSIONS_DIR, f"{user_id}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving settings for {user_id}: {str(e)}")
+        return False
 
-INDEX_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مركز سرعة انجاز 📚للخدمات الطلابية والاكاديمية</title>
-    <!-- PWA Meta Tags -->
-    <meta name="theme-color" content="#007bff">
-    <meta name="description" content="مركز سرعة انجاز للخدمات الطلابية والأكاديمية - نظام التليجرام التلقائي">
-    <link rel="manifest" href="/static/manifest.json">
-    <meta name="mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <meta name="apple-mobile-web-app-title" content="مركز سرعة انجاز">
-    <!-- Icons -->
-    <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192x192.png">
-    <link rel="apple-touch-icon" href="/static/icon-192x192.png">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <style>
-        .header-title {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 25px;
-            border-radius: 15px;
-            margin-bottom: 20px;
-            text-align: center;
-            box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
-        }
-        .whatsapp-link {
-            color: #25D366;
-            text-decoration: none;
-            font-weight: bold;
-            transition: all 0.3s ease;
-        }
-        .whatsapp-link:hover {
-            color: #128C7E;
-            transform: scale(1.05);
-        }
-        .log-container {
-            height: 300px;
-            overflow-y: auto;
-            background: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 5px;
-            padding: 10px;
-        }
-        .console-container {
-            height: 250px;
-            overflow-y: auto;
-            background: #212529;
-            border: 1px solid #dee2e6;
-            border-radius: 5px;
-            padding: 10px;
-            color: #28a745;
-            font-family: 'Courier New', monospace;
-        }
-        .log-entry {
-            margin-bottom: 5px;
-            padding: 5px;
-            border-radius: 3px;
-        }
-        .log-success {
-            background: #d1e7dd;
-            color: #0f5132;
-        }
-        .log-error {
-            background: #f8d7da;
-            color: #842029;
-        }
-        .log-warning {
-            background: #fff3cd;
-            color: #664d03;
-        }
-        .log-info {
-            background: #cff4fc;
-            color: #055160;
-        }
-        .log-time {
-            font-weight: bold;
-            margin-right: 5px;
-        }
-        .console-line {
-            margin-bottom: 2px;
-            font-size: 12px;
-        }
-        .monitoring-status {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            z-index: 1050;
-        }
-        /* تحسين الشكل للجوال */
-        @media (max-width: 768px) {
-            .container-fluid {
-                padding: 10px;
-            }
-            .card-body {
-                padding: 15px;
-            }
-            .log-container, .console-container {
-                height: 200px;
-            }
-            .header-title {
-                padding: 20px;
-            }
-            .header-title h2 {
-                font-size: 1.5rem;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container-fluid mt-4">
-        <!-- مساحة للتنبيهات -->
-        <div id="alertContainer"></div>
-        
-        <!-- مؤشر حالة المراقبة -->
-        <div class="monitoring-status">
-            <span id="monitoringIndicator" class="badge bg-secondary">
-                <i class="fas fa-circle"></i> غير نشط
-            </span>
-        </div>
+def load_settings(user_id):
+    """تحميل إعدادات المستخدم"""
+    try:
+        path = os.path.join(SESSIONS_DIR, f"{user_id}.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        logger.error(f"Error loading settings for {user_id}: {str(e)}")
+        return {}
 
-        <!-- العنوان الرئيسي الجديد -->
-        <div class="header-title">
-            <h2 class="mb-3">
-                <i class="fas fa-graduation-cap me-2"></i>
-                📚 تصميم وتنفيذ مركز سرعة انجاز
-            </h2>
-            <h4 class="mb-3">للخدمات الطلابية والأكاديمية</h4>
-            <p class="mb-2">
-                <i class="fab fa-whatsapp me-2"></i>
-                واتساب: 
-                <a href="https://wa.me/+966510349663" class="whatsapp-link" target="_blank">
-                    +966510349663
-                </a>
-            </p>
-            <div class="mt-3">
-                <small id="connectionStatus" class="badge bg-secondary">
-                    {% if connection_status == 'connected' %}
-                        <i class="fas fa-circle text-success"></i> متصل
-                    {% else %}
-                        <i class="fas fa-circle text-danger"></i> غير متصل
-                    {% endif %}
-                </small>
-            </div>
-        </div>
+def load_all_sessions():
+    """تحميل جميع الجلسات الموجودة"""
+    logger.info("Loading existing sessions...")
+    session_count = 0
 
-        <div class="row">
-            <!-- لوحة تسجيل الدخول -->
-            <div class="col-lg-6 mb-4">
-                <div class="card">
-                    <div class="card-header bg-primary text-white text-center">
-                        <h2 class="mb-1">
-                            <i class="fas fa-telegram-plane me-2"></i>
-                            تصميم وتنفيذ مركز سرعة انجاز 📚
-                        </h2>
-                        <h5 class="mb-2">للخدمات الطلابية والاكاديمية</h5>
-                        <p class="mb-2">
-                            <a href="https://wa.me/+966510349663" target="_blank" class="text-white text-decoration-none">
-                                <i class="fab fa-whatsapp me-1"></i>
-                                +966510349663
-                            </a>
-                        </p>
-                        <small id="connectionStatus" class="badge bg-secondary">
-                            {% if connection_status == 'connected' %}
-                                <i class="fas fa-circle text-success"></i> متصل
-                            {% else %}
-                                <i class="fas fa-circle text-danger"></i> غير متصل
-                            {% endif %}
-                        </small>
-                    </div>
-                    <div class="card-body">
-                        <form id="loginForm">
-                            <div class="mb-3">
-                                <label for="phone" class="form-label">رقم الهاتف</label>
-                                <input type="tel" class="form-control" id="phone" 
-                                       placeholder="+966xxxxxxxxx" 
-                                       value="{{ settings.phone or '' }}"
-                                       required>
-                                <div class="form-text">أدخل رقم الهاتف مع رمز الدولة</div>
-                            </div>
-                            
-                            <div class="mb-3" id="passwordDiv" style="display: none;">
-                                <label for="password" class="form-label">كلمة مرور التليجرام (اختيارية)</label>
-                                <input type="password" class="form-control" id="password" 
-                                       placeholder="كلمة المرور للتحقق الثنائي">
-                            </div>
-                            
-                            <div class="row">
-                                <div class="col-md-6 mb-2">
-                                    <button type="submit" class="btn btn-primary w-100" id="loginBtn">
-                                        <i class="fas fa-sign-in-alt me-2"></i>
-                                        تسجيل الدخول
-                                    </button>
-                                </div>
-                                <div class="col-md-3 mb-2">
-                                    <button type="button" class="btn btn-warning w-100" id="resetBtn" style="display: none;">
-                                        <i class="fas fa-redo me-1"></i>
-                                        إعادة تعيين
-                                    </button>
-                                </div>
-                                <div class="col-md-3 mb-2">
-                                    <button type="button" class="btn btn-danger w-100" id="logoutBtn" style="display: none;">
-                                        <i class="fas fa-sign-out-alt me-1"></i>
-                                        خروج
-                                    </button>
-                                </div>
-                            </div>
-                        </form>
+    with USERS_LOCK:
+        try:
+            for filename in os.listdir(SESSIONS_DIR):
+                if filename.endswith('.json'):
+                    user_id = filename.split('.')[0]
+                    settings = load_settings(user_id)
 
-                        <!-- نموذج التحقق من الكود -->
-                        <div id="codeVerification" style="display: none;">
-                            <hr>
-                            <h6>التحقق من الهوية</h6>
-                            <div class="mb-3">
-                                <label for="verificationCode" class="form-label">كود التحقق</label>
-                                <input type="text" class="form-control" id="verificationCode" 
-                                       placeholder="أدخل الكود المرسل إلى هاتفك">
-                            </div>
-                            
-                            <div class="mb-3" id="passwordVerificationDiv" style="display: none;">
-                                <label for="passwordVerification" class="form-label">كلمة مرور التليجرام</label>
-                                <input type="password" class="form-control" id="passwordVerification" 
-                                       placeholder="أدخل كلمة مرور حسابك">
-                            </div>
-                            
-                            <button type="button" class="btn btn-success" id="verifyBtn">
-                                <i class="fas fa-check me-2"></i>
-                                تأكيد
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
+                    if settings and 'phone' in settings:
+                        USERS[user_id] = {
+                            'client': None,
+                            'settings': settings,
+                            'thread': None,
+                            'is_running': False,
+                            'stats': {"sent": 0, "errors": 0},
+                            'connected': False,
+                            'authenticated': False,
+                            'awaiting_code': False,
+                            'awaiting_password': False,
+                            'phone_code_hash': None,
+                            'loop': None,
+                            'client_thread': None,
+                            'last_scheduled_send': 0,
+                            'monitoring_active': False,
+                            'message_handler': None
+                        }
+                        session_count += 1
+                        logger.info(f"✓ Loaded session for {user_id}")
 
-            <!-- لوحة الإعدادات -->
-            <div class="col-lg-6 mb-4">
-                <div class="card">
-                    <div class="card-header bg-success text-white">
-                        <h5 class="mb-0">
-                            <i class="fas fa-cog me-2"></i>
-                            إعدادات الإرسال
-                        </h5>
-                    </div>
-                    <div class="card-body">
-                        <form id="settingsForm">
-                            <div class="mb-3">
-                                <label for="message" class="form-label">الرسالة</label>
-                                <textarea class="form-control" id="message" rows="4" 
-                                          placeholder="اكتب الرسالة التي تريد إرسالها">{{ settings.message or '' }}</textarea>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="groups" class="form-label">المجموعات</label>
-                                <textarea class="form-control" id="groups" rows="4" 
-                                          placeholder="@group1&#10;@group2&#10;@group3">{% if settings.groups %}{{ '\\n'.join(settings.groups) }}{% endif %}</textarea>
-                                <div class="form-text">أدخل كل مجموعة في سطر منفصل</div>
-                            </div>
-                            
-                            <div class="row">
-                                <div class="col-md-6 mb-3">
-                                    <label for="sendType" class="form-label">نوع الإرسال</label>
-                                    <select class="form-select" id="sendType">
-                                        <option value="keyword_monitoring" {{ 'selected' if settings.send_type == 'keyword_monitoring' else '' }}>مراقبة فورية</option>
-                                        <option value="scheduled" {{ 'selected' if settings.send_type == 'scheduled' else '' }}>مجدول</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-6 mb-3">
-                                    <label for="intervalSeconds" class="form-label">الفترة الزمنية (ثانية)</label>
-                                    <input type="number" class="form-control" id="intervalSeconds" 
-                                           value="{{ settings.interval_seconds or 3600 }}" min="60">
-                                    <div class="form-text">للإرسال المجدول فقط</div>
-                                </div>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="watchWords" class="form-label">الكلمات المراقبة</label>
-                                <textarea class="form-control" id="watchWords" rows="3" 
-                                          placeholder="كلمة1&#10;كلمة2&#10;كلمة3">{% if settings.watch_words %}{{ '\\n'.join(settings.watch_words) }}{% endif %}</textarea>
-                                <div class="form-text">أدخل كل كلمة في سطر منفصل (للمراقبة التلقائية)</div>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="autoReconnect"
-                                           {{ 'checked' if settings.auto_reconnect else '' }}>
-                                    <label class="form-check-label" for="autoReconnect">
-                                        إعادة الاتصال التلقائي
-                                    </label>
-                                </div>
-                            </div>
-                            
-                            <button type="submit" class="btn btn-success">
-                                <i class="fas fa-save me-2"></i>
-                                حفظ الإعدادات
-                            </button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-        </div>
+        except Exception as e:
+            logger.error(f"Error loading sessions: {str(e)}")
 
-        <!-- لوحة التحكم -->
-        <div class="row">
-            <div class="col-lg-8 mb-4">
-                <div class="card">
-                    <div class="card-header bg-info text-white">
-                        <h5 class="mb-0">
-                            <i class="fas fa-play-circle me-2"></i>
-                            التحكم في النظام
-                        </h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <div class="col-md-3 mb-2">
-                                <button class="btn btn-success w-100" id="startBtn">
-                                    <i class="fas fa-play me-2"></i>
-                                    بدء المراقبة الفورية
-                                </button>
-                            </div>
-                            <div class="col-md-3 mb-2">
-                                <button class="btn btn-danger w-100" id="stopBtn" style="display: none;">
-                                    <i class="fas fa-stop me-2"></i>
-                                    إيقاف المراقبة
-                                </button>
-                            </div>
-                            <div class="col-md-3 mb-2">
-                                <button class="btn btn-warning w-100" id="sendNowBtn">
-                                    <i class="fas fa-paper-plane me-2"></i>
-                                    إرسال فوري
-                                </button>
-                            </div>
-                            <div class="col-md-3 mb-2">
-                                <button class="btn btn-info w-100" id="autoSendBtn">
-                                    <i class="fas fa-robot me-2"></i>
-                                    إرسال تلقائي
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+    logger.info(f"Loaded {session_count} sessions successfully")
+    return session_count
 
-            <!-- لوحة الإحصائيات -->
-            <div class="col-lg-4 mb-4">
-                <div class="card">
-                    <div class="card-header bg-secondary text-white">
-                        <h5 class="mb-0">
-                            <i class="fas fa-chart-bar me-2"></i>
-                            الإحصائيات
-                        </h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row text-center">
-                            <div class="col-6">
-                                <div class="border-end">
-                                    <h3 id="sentCount" class="text-success">0</h3>
-                                    <small>تم الإرسال</small>
-                                </div>
-                            </div>
-                            <div class="col-6">
-                                <h3 id="errorCount" class="text-danger">0</h3>
-                                <small>الأخطاء</small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+# ===========================
+# مدير التليجرام المحسن
+# ===========================
+class TelegramClientManager:
+    """مدير عملاء التليجرام المحسن"""
 
-        <!-- سجل النشاط -->
-        <div class="row">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header bg-dark text-white d-flex justify-content-between">
-                        <h5 class="mb-0">
-                            <i class="fas fa-list-alt me-2"></i>
-                            سجل النشاط
-                        </h5>
-                        <button class="btn btn-sm btn-outline-light" id="clearLogsBtn">
-                            <i class="fas fa-trash me-1"></i>
-                            مسح السجل
-                        </button>
-                    </div>
-                    <div class="card-body">
-                        <div id="logContainer" class="log-container">
-                            <div class="text-muted">لا توجد رسائل حتى الآن...</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.client = None
+        self.loop = None
+        self.thread = None
+        self.stop_flag = threading.Event()
+        self.is_ready = threading.Event()
 
-        <!-- وحدة التحكم -->
-        <div class="row mt-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header bg-warning text-dark d-flex justify-content-between">
-                        <h5 class="mb-0">
-                            <i class="fas fa-terminal me-2"></i>
-                            وحدة التحكم
-                        </h5>
-                        <button class="btn btn-sm btn-outline-dark" id="clearConsoleBtn">
-                            <i class="fas fa-broom me-1"></i>
-                            مسح الوحدة
-                        </button>
-                    </div>
-                    <div class="card-body">
-                        <div id="consoleContainer" class="console-container">
-                            <div class="text-muted">Console ready...</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+    def start_client_thread(self):
+        """بدء thread منفصل للعميل"""
+        if self.thread and self.thread.is_alive():
+            return
 
-        <!-- معلومات التطبيق المحمول -->
-        <div class="row mt-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header bg-info text-white">
-                        <h5 class="mb-0">
-                            <i class="fas fa-mobile-alt me-2"></i>
-                            تحميل التطبيق المحمول
-                        </h5>
-                    </div>
-                    <div class="card-body text-center">
-                        <p>يمكنك إضافة هذا النظام إلى شاشتك الرئيسية كتطبيق</p>
-                        <div class="row">
-                            <div class="col-md-6 mb-2">
-                                <button class="btn btn-success w-100" id="installBtn" style="display: none;">
-                                    <i class="fas fa-download me-2"></i>
-                                    تثبيت التطبيق
-                                </button>
-                            </div>
-                            <div class="col-md-6 mb-2">
-                                <small class="text-muted">
-                                    للأندرويد: استخدم Chrome وانقر "إضافة إلى الشاشة الرئيسية"<br>
-                                    لآيفون: استخدم Safari وانقر مشاركة ← إضافة إلى الشاشة الرئيسية
-                                </small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+        self.stop_flag.clear()
+        self.is_ready.clear()
+        self.thread = threading.Thread(target=self._run_client_loop, daemon=True)
+        self.thread.start()
 
-    <!-- Toast Notifications -->
-    <div class="toast-container position-fixed bottom-0 end-0 p-3">
-        <div id="toast" class="toast align-items-center text-white bg-primary" role="alert" aria-live="assertive" aria-atomic="true">
-            <div class="d-flex">
-                <div class="toast-body" id="toastBody">
-                </div>
-                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-            </div>
-        </div>
-    </div>
+        # انتظار حتى يصبح العميل جاهزاً
+        if not self.is_ready.wait(timeout=30):
+            raise Exception("Client initialization timeout")
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
-    <script>
-        // PWA Install
-        let deferredPrompt;
-        const installBtn = document.getElementById('installBtn');
-        
-        window.addEventListener('beforeinstallprompt', (e) => {
-            e.preventDefault();
-            deferredPrompt = e;
-            installBtn.style.display = 'block';
-        });
-        
-        installBtn.addEventListener('click', async () => {
-            if (deferredPrompt) {
-                deferredPrompt.prompt();
-                const { outcome } = await deferredPrompt.userChoice;
-                if (outcome === 'accepted') {
-                    console.log('App installed');
+    def _run_client_loop(self):
+        """تشغيل event loop للعميل"""
+        try:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+
+            session_file = os.path.join(SESSIONS_DIR, f"{self.user_id}_session.session")
+            self.client = TelegramClient(session_file, int(API_ID), API_HASH)
+
+            self.loop.run_until_complete(self._client_main())
+
+        except Exception as e:
+            logger.error(f"Client thread error for {self.user_id}: {str(e)}")
+        finally:
+            if self.loop:
+                self.loop.close()
+
+    async def _client_main(self):
+        """الوظيفة الرئيسية للعميل"""
+        try:
+            await self.client.connect()
+            self.is_ready.set()
+
+            while not self.stop_flag.is_set():
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Client main error: {str(e)}")
+        finally:
+            await self.client.disconnect()
+
+    def run_coroutine(self, coro):
+        """تشغيل coroutine في event loop الخاص بالعميل"""
+        if not self.loop:
+            raise Exception("Event loop not initialized")
+
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return future.result(timeout=30)
+
+    def stop(self):
+        """إيقاف العميل"""
+        self.stop_flag.set()
+        if self.thread:
+            self.thread.join(timeout=5)
+
+# ===========================
+# مدير التليجرام الحقيقي
+# ===========================
+class TelegramManager:
+    """مدير عملاء التليجرام"""
+
+    def __init__(self):
+        self.client_managers = {}
+
+    def get_client_manager(self, user_id):
+        """الحصول على مدير العميل للمستخدم"""
+        if user_id not in self.client_managers:
+            self.client_managers[user_id] = TelegramClientManager(user_id)
+        return self.client_managers[user_id]
+
+    def setup_client(self, user_id, phone_number):
+        """إعداد عميل التليجرام"""
+        try:
+            if not API_ID or not API_HASH:
+                return {
+                    "status": "error", 
+                    "message": "❌ بيانات API غير متوفرة"
                 }
-                deferredPrompt = null;
-                installBtn.style.display = 'none';
-            }
-        });
-        
-        // Register Service Worker
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/static/sw.js')
-                .then((registration) => {
-                    console.log('SW registered: ', registration);
-                })
-                .catch((registrationError) => {
-                    console.log('SW registration failed: ', registrationError);
-                });
-            });
-        }
-        
-        // Socket.IO and App Logic
-        const socket = io();
-        const user_id = '{{ session.get("user_id", "") }}';
-        
-        if (user_id) {
-            socket.emit('join', {room: user_id});
-        }
-        
-        // إدارة حالة الاتصال
-        socket.on('connection_status', (data) => {
-            const statusBadge = document.getElementById('connectionStatus');
-            if (data.status === 'connected') {
-                statusBadge.innerHTML = '<i class="fas fa-circle text-success"></i> متصل';
-                statusBadge.classList.remove('bg-secondary');
-                statusBadge.classList.add('bg-success');
-            } else {
-                statusBadge.innerHTML = '<i class="fas fa-circle text-danger"></i> غير متصل';
-                statusBadge.classList.remove('bg-success');
-                statusBadge.classList.add('bg-secondary');
-            }
-        });
-        
-        // تحديث الإحصائيات
-        socket.on('stats_update', (data) => {
-            document.getElementById('sentCount').textContent = data.sent;
-            document.getElementById('errorCount').textContent = data.errors;
-        });
-        
-        // تحديث سجل النشاط
-        socket.on('log_update', (data) => {
-            const logContainer = document.getElementById('logContainer');
-            const logEntry = document.createElement('div');
-            logEntry.className = 'log-entry log-info';
-            
-            const timestamp = new Date().toLocaleTimeString();
-            logEntry.innerHTML = `<span class="log-time">[${timestamp}]</span> ${data.message}`;
-            
-            // تحديد نوع السجل وإضافة التنسيق المناسب
-            if (data.message.includes('❌') || data.message.includes('فشل') || data.message.includes('خطأ')) {
-                logEntry.className = 'log-entry log-error';
-            } else if (data.message.includes('⚠️') || data.message.includes('تحذير')) {
-                logEntry.className = 'log-entry log-warning';
-            } else if (data.message.includes('✅') || data.message.includes('نجح')) {
-                logEntry.className = 'log-entry log-success';
-            }
-            
-            logContainer.appendChild(logEntry);
-            logContainer.scrollTop = logContainer.scrollHeight;
-            
-            // إذا كان السجل يحتوي على كلمة "تنبيه"، عرض إشعار toast
-            if (data.message.includes('تنبيه')) {
-                showToast(data.message);
-            }
-        });
-        
-        // تنبيهات الكلمات المفتاحية
-        socket.on('keyword_alert', (data) => {
-            const alertContainer = document.getElementById('alertContainer');
-            const alertDiv = document.createElement('div');
-            alertDiv.className = 'alert alert-warning alert-dismissible fade show';
-            alertDiv.innerHTML = `
-                <strong>🚨 تنبيه فوري!</strong> 
-                تم اكتشاف الكلمة "${data.keyword}" في ${data.group}
-                <br><small>المرسل: ${data.sender} | الوقت: ${data.timestamp}</small>
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            `;
-            alertContainer.appendChild(alertDiv);
-            
-            // إضافة إلى سجل النشاط أيضاً
-            const logContainer = document.getElementById('logContainer');
-            const logEntry = document.createElement('div');
-            logEntry.className = 'log-entry log-warning';
-            
-            const timestamp = new Date().toLocaleTimeString();
-            logEntry.innerHTML = `<span class="log-time">[${timestamp}]</span> 🚨 تنبيه فوري: "${data.keyword}" في ${data.group} من ${data.sender}`;
-            
-            logContainer.appendChild(logEntry);
-            logContainer.scrollTop = logContainer.scrollHeight;
-            
-            // عرض إشعار toast
-            showToast(`🚨 تنبيه فوري: "${data.keyword}" في ${data.group}`);
-        });
-        
-        // تحديث حالة المراقبة
-        socket.on('heartbeat', (data) => {
-            const indicator = document.getElementById('monitoringIndicator');
-            if (data.status === 'active') {
-                indicator.innerHTML = '<i class="fas fa-circle text-success"></i> نشط';
-                indicator.classList.remove('bg-secondary');
-                indicator.classList.add('bg-success');
+
+            client_manager = self.get_client_manager(user_id)
+            client_manager.start_client_thread()
+
+            is_authorized = client_manager.run_coroutine(
+                client_manager.client.is_user_authorized()
+            )
+
+            if not is_authorized:
+                sent = client_manager.run_coroutine(
+                    client_manager.client.send_code_request(phone_number)
+                )
+
+                with USERS_LOCK:
+                    if user_id in USERS:
+                        USERS[user_id]['awaiting_code'] = True
+                        USERS[user_id]['phone_code_hash'] = sent.phone_code_hash
+                        USERS[user_id]['client_manager'] = client_manager
+
+                return {
+                    "status": "code_required", 
+                    "message": "📱 تم إرسال كود التحقق"
+                }
+            else:
+                with USERS_LOCK:
+                    if user_id in USERS:
+                        USERS[user_id]['client_manager'] = client_manager
+                        USERS[user_id]['connected'] = True
+                        USERS[user_id]['authenticated'] = True
+
+                return {"status": "success", "message": "✅ تم تسجيل الدخول"}
+
+        except Exception as e:
+            logger.error(f"Setup error for {user_id}: {str(e)}")
+            return {"status": "error", "message": f"❌ خطأ: {str(e)}"}
+
+    def verify_code(self, user_id, code):
+        """التحقق من كود التحقق"""
+        try:
+            with USERS_LOCK:
+                if user_id not in USERS or not USERS[user_id].get('awaiting_code'):
+                    return {"status": "error", "message": "❌ لم يتم طلب كود التحقق"}
+
+                client_manager = USERS[user_id].get('client_manager')
+                phone_code_hash = USERS[user_id].get('phone_code_hash')
+                phone = USERS[user_id]['settings']['phone']
+
+            if not client_manager or not phone_code_hash:
+                return {"status": "error", "message": "❌ بيانات الجلسة مفقودة"}
+
+            try:
+                user = client_manager.run_coroutine(
+                    client_manager.client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+                )
+
+                with USERS_LOCK:
+                    USERS[user_id]['connected'] = True
+                    USERS[user_id]['authenticated'] = True
+                    USERS[user_id]['awaiting_code'] = False
+                    USERS[user_id]['awaiting_password'] = False
+
+                return {"status": "success", "message": "✅ تم التحقق بنجاح"}
+
+            except SessionPasswordNeededError:
+                with USERS_LOCK:
+                    USERS[user_id]['awaiting_code'] = False
+                    USERS[user_id]['awaiting_password'] = True
+
+                return {
+                    "status": "password_required", 
+                    "message": "🔒 يرجى إدخال كلمة مرور التحقق بخطوتين"
+                }
+
+        except PhoneCodeInvalidError:
+            return {"status": "error", "message": "❌ كود التحقق غير صحيح"}
+        except PhoneCodeExpiredError:
+            return {"status": "error", "message": "❌ انتهت صلاحية كود التحقق"}
+        except Exception as e:
+            logger.error(f"Code verification error: {str(e)}")
+            return {"status": "error", "message": f"❌ خطأ: {str(e)}"}
+
+    def verify_password(self, user_id, password):
+        """التحقق من كلمة المرور"""
+        try:
+            with USERS_LOCK:
+                if user_id not in USERS or not USERS[user_id].get('awaiting_password'):
+                    return {"status": "error", "message": "❌ لم يتم طلب كلمة المرور"}
+
+                client_manager = USERS[user_id].get('client_manager')
+
+            if not client_manager:
+                return {"status": "error", "message": "❌ بيانات الجلسة مفقودة"}
+
+            try:
+                await_result = client_manager.run_coroutine(
+                    client_manager.client.sign_in(password=password)
+                )
+
+                with USERS_LOCK:
+                    USERS[user_id]['connected'] = True
+                    USERS[user_id]['authenticated'] = True
+                    USERS[user_id]['awaiting_password'] = False
+
+                return {"status": "success", "message": "✅ تم التحقق بنجاح"}
+
+            except PasswordHashInvalidError:
+                return {"status": "error", "message": "❌ كلمة المرور غير صحيحة"}
+
+        except Exception as e:
+            logger.error(f"Password verification error: {str(e)}")
+            return {"status": "error", "message": f"❌ خطأ: {str(e)}"}
+
+    def send_message_async(self, user_id, entity, message):
+        """إرسال رسالة"""
+        try:
+            with USERS_LOCK:
+                if user_id not in USERS:
+                    raise Exception("المستخدم غير موجود")
+
+                client_manager = USERS[user_id].get('client_manager')
+
+            if not client_manager:
+                raise Exception("العميل غير متصل")
+
+            is_authorized = client_manager.run_coroutine(
+                client_manager.client.is_user_authorized()
+            )
+
+            if not is_authorized:
+                raise Exception("العميل غير مصرح")
+
+            try:
+                entity_obj = client_manager.run_coroutine(
+                    client_manager.client.get_entity(entity)
+                )
+            except:
+                if not entity.startswith('@') and not entity.startswith('https://'):
+                    entity = '@' + entity
+                entity_obj = client_manager.run_coroutine(
+                    client_manager.client.get_entity(entity)
+                )
+
+            result = client_manager.run_coroutine(
+                client_manager.client.send_message(entity_obj, message)
+            )
+
+            return {"success": True, "message_id": result.id}
+
+        except Exception as e:
+            logger.error(f"Send message error: {str(e)}")
+            raise Exception(str(e))
+
+# إنشاء مدير التليجرام
+telegram_manager = TelegramManager()
+
+# ===========================
+# نظام المراقبة الفورية واللحظية
+# ===========================
+def setup_message_handler(user_id):
+    """إعداد معالج الرسائل للمراقبة الفورية"""
+    try:
+        with USERS_LOCK:
+            if user_id not in USERS:
+                return False
                 
-                // إظهار زر الإيقاف وإخفاء زر البدء
-                document.getElementById('startBtn').style.display = 'none';
-                document.getElementById('stopBtn').style.display = 'block';
-            } else {
-                indicator.innerHTML = '<i class="fas fa-circle text-danger"></i> غير نشط';
-                indicator.classList.remove('bg-success');
-                indicator.classList.add('bg-secondary');
+            client_manager = USERS[user_id].get('client_manager')
+            if not client_manager:
+                return False
                 
-                // إظهار زر البدء وإخفاء زر الإيقاف
-                document.getElementById('startBtn').style.display = 'block';
-                document.getElementById('stopBtn').style.display = 'none';
+            settings = USERS[user_id]['settings']
+            watch_words = settings.get('watch_words', [])
+            
+            if not watch_words:
+                return False
+                
+            # إضافة معالج الأحداث للرسائل الجديدة
+            @client_manager.client.on(events.NewMessage(incoming=True))
+            async def handler(event):
+                try:
+                    message_text = event.message.text or ""
+                    sender = await event.get_sender()
+                    chat = await event.get_chat()
+                    
+                    # التحقق من وجود كلمات مراقبة في الرسالة
+                    for keyword in watch_words:
+                        if keyword.lower() in message_text.lower():
+                            # إرسال تنبيه إلى المحادثة الخاصة
+                            alert_message = f"🚨 تنبيه مراقبة - كلمة مفتاحية: {keyword}\n\n"
+                            alert_message += f"📝 النص: {message_text[:200]}...\n\n"
+                            alert_message += f"👤 المرسل: {getattr(sender, 'first_name', '') or getattr(sender, 'username', '') or 'غير معروف'}\n"
+                            alert_message += f"💬 الدردشة: {getattr(chat, 'title', '') or getattr(chat, 'username', '') or 'خاص'}\n"
+                            alert_message += f"🕐 الوقت: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                            
+                            # إرسال التنبيه إلى المحادثة المحفوظة
+                            await client_manager.client.send_message('me', alert_message)
+                            
+                            # إرسال التنبيه إلى الواجهة عبر SocketIO
+                            socketio.emit('keyword_alert', {
+                                "keyword": keyword,
+                                "message": message_text[:200],
+                                "sender": getattr(sender, 'first_name', '') or getattr(sender, 'username', '') or 'غير معروف',
+                                "chat": getattr(chat, 'title', '') or getattr(chat, 'username', '') or 'خاص',
+                                "timestamp": time.strftime('%H:%M:%S')
+                            }, to=user_id)
+                            
+                            break
+                            
+                except Exception as e:
+                    logger.error(f"Error in message handler for {user_id}: {str(e)}")
+            
+            # حفظ المرجع إلى المعالج
+            USERS[user_id]['message_handler'] = handler
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error setting up message handler for {user_id}: {str(e)}")
+        return False
+
+def monitoring_worker(user_id):
+    """مهمة المراقبة الفورية والمستمرة"""
+    logger.info(f"Starting instant real-time monitoring for user {user_id}")
+
+    try:
+        # تهيئة متغيرات المراقبة الفورية
+        with USERS_LOCK:
+            if user_id in USERS:
+                USERS[user_id]['monitoring_active'] = True
+                settings = USERS[user_id]['settings'].copy()
+                client_manager = USERS[user_id].get('client_manager')
+
+        if not client_manager:
+            logger.error(f"No client manager for user {user_id}")
+            return
+
+        # إعداد معالج الرسائل للمراقبة الفورية
+        if not setup_message_handler(user_id):
+            logger.error(f"Failed to setup message handler for user {user_id}")
+            return
+
+        # إرسال إشعار بدء المراقبة الفورية
+        socketio.emit('log_update', {
+            "message": "🚀 بدأت المراقبة الفورية - سيتم إرسال التنبيهات فور وصول أي رسالة تحتوي على الكلمات المراقبة"
+        }, to=user_id)
+
+        # البقاء في الحلقة للمراقبة المستمرة
+        while True:
+            with USERS_LOCK:
+                if user_id not in USERS or not USERS[user_id]['is_running']:
+                    logger.info(f"Stopping monitoring for user {user_id}")
+                    break
+
+            # إرسال إشارة حياة للمراقبة
+            status_info = {
+                'timestamp': time.strftime('%H:%M:%S'),
+                'status': 'active',
+                'type': 'instant_monitoring'
             }
-        });
-        
-        // دالة لعرض إشعارات Toast
-        function showToast(message) {
-            const toastBody = document.getElementById('toastBody');
-            toastBody.textContent = message;
+
+            socketio.emit('heartbeat', status_info, to=user_id)
             
-            const toast = new bootstrap.Toast(document.getElementById('toast'));
-            toast.show();
-        }
-        
-        // إدارة النماذج والأزرار
-        document.getElementById('loginForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const phone = document.getElementById('phone').value;
-            const password = document.getElementById('password').value;
-            
-            fetch('/api/save_login', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({phone, password})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    if (data.code_required) {
-                        document.getElementById('codeVerification').style.display = 'block';
-                    } else {
-                        showToast('✅ تم تسجيل الدخول بنجاح');
-                        document.getElementById('resetBtn').style.display = 'block';
-                        document.getElementById('logoutBtn').style.display = 'block';
-                    }
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء تسجيل الدخول');
-            });
-        });
-        
-        document.getElementById('verifyBtn').addEventListener('click', function() {
-            const code = document.getElementById('verificationCode').value;
-            const password = document.getElementById('passwordVerification').value;
-            
-            fetch('/api/verify_code', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({code, password})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast('✅ تم التحقق بنجاح');
-                    document.getElementById('codeVerification').style.display = 'none';
-                    document.getElementById('resetBtn').style.display = 'block';
-                    document.getElementById('logoutBtn').style.display = 'block';
-                } else if (data.password_required) {
-                    document.getElementById('passwordVerificationDiv').style.display = 'block';
-                    showToast('🔒 يرجى إدخال كلمة مرور التحقق بخطوتين');
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء التحقق');
-            });
-        });
-        
-        document.getElementById('settingsForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const message = document.getElementById('message').value;
-            const groups = document.getElementById('groups').value.split('\\n').filter(g => g.trim());
-            const intervalSeconds = document.getElementById('intervalSeconds').value;
-            const watchWords = document.getElementById('watchWords').value.split('\\n').filter(w => w.trim());
-            const sendType = document.getElementById('sendType').value;
-            const autoReconnect = document.getElementById('autoReconnect').checked;
-            
-            fetch('/api/save_settings', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    message, 
-                    groups: groups.join('\\n'), 
-                    intervalSeconds, 
-                    watchWords: watchWords.join('\\n'), 
-                    sendType, 
-                    autoReconnect
+            # انتظار قصير جداً لتجنب استهلاك CPU عالي
+            time.sleep(1)
+
+    except Exception as e:
+        logger.error(f"Monitoring worker error for {user_id}: {str(e)}")
+        socketio.emit('log_update', {
+            "message": f"❌ خطأ في المراقبة: {str(e)}"
+        }, to=user_id)
+    finally:
+        with USERS_LOCK:
+            if user_id in USERS:
+                USERS[user_id]['is_running'] = False
+                USERS[user_id]['monitoring_active'] = False
+                USERS[user_id]['thread'] = None
+
+        socketio.emit('log_update', {
+            "message": "⏹ تم إيقاف نظام المراقبة الفورية"
+        }, to=user_id)
+
+        socketio.emit('heartbeat', {
+            'timestamp': time.strftime('%H:%M:%S'),
+            'status': 'stopped'
+        }, to=user_id)
+
+        logger.info(f"Monitoring worker ended for user {user_id}")
+
+# ===========================
+# أحداث Socket.IO
+# ===========================
+@socketio.on('connect')
+def handle_connect():
+    if 'user_id' in session:
+        user_id = session['user_id']
+        join_room(user_id)
+        logger.info(f"User {user_id} connected via socket")
+
+        with USERS_LOCK:
+            if user_id in USERS:
+                connected = USERS[user_id].get('connected', False)
+                emit('connection_status', {
+                    "status": "connected" if connected else "disconnected"
                 })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast('✅ تم حفظ الإعدادات بنجاح');
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء حفظ الإعدادات');
-            });
-        });
-        
-        document.getElementById('startBtn').addEventListener('click', function() {
-            fetch('/api/start_monitoring', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast('🚀 بدأت المراقبة');
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء بدء المراقبة');
-            });
-        });
-        
-        document.getElementById('stopBtn').addEventListener('click', function() {
-            fetch('/api/stop_monitoring', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast('⏹ توقفت المراقبة');
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء إيقاف المراقبة');
-            });
-        });
-        
-        document.getElementById('sendNowBtn').addEventListener('click', function() {
-            fetch('/api/send_now', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast('🚀 بدأ الإرسال الفوري');
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء الإرسال الفوري');
-            });
-        });
-        
-        document.getElementById('resetBtn').addEventListener('click', function() {
-            fetch('/api/reset_login', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast('🔄 تم إعادة تعيين الجلسة');
-                    document.getElementById('resetBtn').style.display = 'none';
-                    document.getElementById('logoutBtn').style.display = 'none';
-                    document.getElementById('codeVerification').style.display = 'none';
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء إعادة التعيين');
-            });
-        });
-        
-        document.getElementById('logoutBtn').addEventListener('click', function() {
-            fetch('/api/logout', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showToast('✅ تم تسجيل الخروج');
-                    document.getElementById('resetBtn').style.display = 'none';
-                    document.getElementById('logoutBtn').style.display = 'none';
-                } else {
-                    showToast('❌ ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showToast('❌ حدث خطأ أثناء تسجيل الخروج');
-            });
-        });
-        
-        document.getElementById('clearLogsBtn').addEventListener('click', function() {
-            document.getElementById('logContainer').innerHTML = '<div class="text-muted">لا توجد رسائل حتى الآن...</div>';
-        });
-        
-        document.getElementById('clearConsoleBtn').addEventListener('click', function() {
-            document.getElementById('consoleContainer').innerHTML = '<div class="text-muted">Console ready...</div>';
-        });
-        
-        // تحميل الإحصائيات الأولية
-        fetch('/api/get_stats')
-        .then(response => response.json())
-        .then(data => {
-            document.getElementById('sentCount').textContent = data.sent;
-            document.getElementById('errorCount').textContent = data.errors;
-        });
-        
-        // التحقق من حالة تسجيل الدخول
-        fetch('/api/get_login_status')
-        .then(response => response.json())
-        .then(data => {
-            if (data.logged_in) {
-                document.getElementById('resetBtn').style.display = 'block';
-                document.getElementById('logoutBtn').style.display = 'block';
+
+        emit('console_log', {
+            "message": f"[{time.strftime('%H:%M:%S')}] INFO: Socket connected"
+        })
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    if 'user_id' in session:
+        user_id = session['user_id']
+        leave_room(user_id)
+        logger.info(f"User {user_id} disconnected from socket")
+
+# ===========================
+# المسارات الأساسية
+# ===========================
+@app.route("/")
+def index():
+    if 'user_id' not in session:
+        session['user_id'] = str(uuid.uuid4())
+        session.permanent = True
+
+    user_id = session['user_id']
+    settings = load_settings(user_id)
+    connection_status = "disconnected"
+
+    with USERS_LOCK:
+        if user_id in USERS:
+            connected = USERS[user_id].get('connected', False)
+            connection_status = "connected" if connected else "disconnected"
+
+    # إضافة عنوان التطبيق
+    app_title = "مركز سرعة انجاز 📚للخدمات الطلابية والاكاديمية"
+    whatsapp_link = "https://wa.me/+966510349663"
+
+    return render_template('index.html', 
+                         settings=settings, 
+                         connection_status=connection_status,
+                         app_title=app_title,
+                         whatsapp_link=whatsapp_link)
+
+@app.route("/admin")
+def admin():
+    if not session.get('is_admin'):
+        return redirect('/admin_login')
+
+    with USERS_LOCK:
+        users_data = {}
+        for user_id, data in USERS.items():
+            users_data[user_id] = {
+                'settings': data['settings'],
+                'is_running': data['is_running'],
+                'stats': data['stats'],
+                'connected': data.get('connected', False)
             }
-            if (data.is_running) {
-                document.getElementById('startBtn').style.display = 'none';
-                document.getElementById('stopBtn').style.display = 'block';
+
+    return render_template('admin.html', users=users_data)
+
+@app.route("/admin_login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "GET":
+        return render_template('admin_login.html')
+
+    if request.form.get('password') == ADMIN_PASSWORD:
+        session['is_admin'] = True
+        return redirect('/admin')
+
+    return render_template('admin_login.html', error="كلمة المرور غير صحيحة")
+
+@app.route('/static/<path:filename>')
+def static_files(filename):
+    """خدمة الملفات الثابتة بما في ذلك manifest وأيقونات PWA"""
+    return app.send_static_file(filename)
+
+# ===========================
+# API Routes
+# ===========================
+@app.route("/api/save_login", methods=["POST"])
+def api_save_login():
+    user_id = session['user_id']
+    data = request.json
+
+    if not data or not data.get('phone'):
+        return jsonify({
+            "success": False, 
+            "message": "❌ يرجى إدخال رقم الهاتف"
+        })
+
+    settings = {
+        'phone': data.get('phone'),
+        'password': data.get('password', ''),
+        'login_time': time.time()
+    }
+
+    if not save_settings(user_id, settings):
+        return jsonify({
+            "success": False, 
+            "message": "❌ فشل في حفظ البيانات"
+        })
+
+    try:
+        socketio.emit('log_update', {
+            "message": "🔄 بدء عملية تسجيل الدخول..."
+        }, to=user_id)
+
+        with USERS_LOCK:
+            USERS[user_id] = {
+                'client': None,
+                'settings': settings,
+                'thread': None,
+                'is_running': False,
+                'stats': {"sent": 0, "errors": 0},
+                'connected': False,
+                'authenticated': False,
+                'awaiting_code': False,
+                'awaiting_password': False,
+                'phone_code_hash': None,
+                'client_manager': None,
+                'last_scheduled_send': 0,
+                'monitoring_active': False,
+                'message_handler': None
             }
-        });
-    </script>
-</body>
-</html>
-'''
 
-ADMIN_LOGIN_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>تسجيل دخول الإدارة</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <style>
-        body {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: 'Arial', sans-serif;
-        }
-        .login-card {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 15px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-        .card-header {
-            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
-            border-radius: 15px 15px 0 0 !important;
-            border: none;
-        }
-        .form-control:focus {
-            box-shadow: 0 0 0 0.25rem rgba(255, 107, 107, 0.25);
-            border-color: #ff6b6b;
-        }
-        .btn-danger {
-            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
-            border: none;
-            transition: transform 0.2s ease;
-        }
-        .btn-danger:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(238, 90, 36, 0.4);
-        }
-        .error-alert {
-            background: rgba(220, 53, 69, 0.1);
-            border: 1px solid rgba(220, 53, 69, 0.2);
-            border-radius: 10px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="row justify-content-center">
-            <div class="col-md-6 col-lg-4">
-                <div class="card login-card">
-                    <div class="card-header text-center text-white py-4">
-                        <i class="fas fa-shield-alt fa-3x mb-3"></i>
-                        <h4 class="mb-0">لوحة الإدارة</h4>
-                        <p class="mb-0 opacity-75">تسجيل دخول المدير</p>
-                    </div>
-                    <div class="card-body p-4">
-                        {% if error %}
-                        <div class="alert error-alert text-danger mb-4">
-                            <i class="fas fa-exclamation-triangle me-2"></i>
-                            {{ error }}
-                        </div>
-                        {% endif %}
-                        <form method="POST">
-                            <div class="mb-4">
-                                <label for="password" class="form-label">
-                                    <i class="fas fa-lock me-2"></i>
-                                    كلمة المرور
-                                </label>
-                                <input type="password" 
-                                       class="form-control form-control-lg" 
-                                       id="password" 
-                                       name="password" 
-                                       placeholder="أدخل كلمة مرور الإدارة"
-                                       required 
-                                       autofocus>
-                            </div>
-                            <button type="submit" class="btn btn-danger btn-lg w-100 mb-3">
-                                <i class="fas fa-sign-in-alt me-2"></i>
-                                دخول لوحة الإدارة
-                            </button>
-                        </form>
-                        <div class="text-center">
-                            <a href="/" class="text-muted text-decoration-none">
-                                <i class="fas fa-arrow-right me-1"></i>
-                                العودة للصفحة الرئيسية
-                            </a>
-                        </div>
-                    </div>
-                    <div class="card-footer text-center text-muted small py-3">
-                        <i class="fas fa-lock me-1"></i>
-                        منطقة محمية - المدير فقط
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-'''
+        result = telegram_manager.setup_client(user_id, settings['phone'])
 
-ADMIN_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة الإدارة - نظام التليجرام</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <style>
-        .log-container {
-            height: 300px;
-            overflow-y: auto;
-            background: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 5px;
-            padding: 10px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container-fluid">
-        <nav class="navbar navbar-expand-lg navbar-dark bg-danger mb-4">
-            <div class="container">
-                <a class="navbar-brand" href="#">
-                    <i class="fas fa-user-shield me-2"></i>
-                    لوحة الإدارة
-                </a>
-                <div class="navbar-nav ms-auto">
-                    <a class="nav-link" href="/">
-                        <i class="fas fa-home me-1"></i>
-                        الصفحة الرئيسية
-                    </a>
-                </div>
-            </div>
-        </nav>
+        if result["status"] == "success":
+            socketio.emit('log_update', {
+                "message": "✅ تم تسجيل الدخول بنجاح"
+            }, to=user_id)
 
-        <div class="container">
-            <!-- إحصائيات عامة -->
-            <div class="row mb-4">
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-primary text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="totalUsers">{{ users|length }}</h4>
-                                    <small>إجمالي المستخدمين</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-users fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-success text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="activeUsers">
-                                        {% set active_count = users.values() | selectattr('is_running') | list | length %}
-                                        {{ active_count }}
-                                    </h4>
-                                    <small>المستخدمين النشطين</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-play-circle fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-info text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="totalSent">
-                                        {% set total_sent = users.values() | sum(attribute='stats.sent') %}
-                                        {{ total_sent }}
-                                    </h4>
-                                    <small>إجمالي المرسل</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-paper-plane fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-warning text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="totalErrors">
-                                        {% set total_errors = users.values() | sum(attribute='stats.errors') %}
-                                        {{ total_errors }}
-                                    </h4>
-                                    <small>إجمالي الأخطاء</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-exclamation-triangle fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+            socketio.emit('connection_status', {
+                "status": "connected"
+            }, to=user_id)
 
-            <!-- جدول المستخدمين -->
-            <div class="card">
-                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">
-                        <i class="fas fa-table me-2"></i>
-                        إدارة المستخدمين
-                    </h5>
-                    <button class="btn btn-outline-light btn-sm" id="refreshBtn">
-                        <i class="fas fa-sync me-1"></i>
-                        تحديث
-                    </button>
-                </div>
-                <div class="card-body">
-                    <div class="table-responsive">
-                        <table class="table table-striped table-hover">
-                            <thead class="table-dark">
-                                <tr>
-                                    <th>ID المستخدم</th>
-                                    <th>رقم الهاتف</th>
-                                    <th>الحالة</th>
-                                    <th>الإحصائيات</th>
-                                    <th>نوع الإرسال</th>
-                                    <th>المجموعات</th>
-                                    <th>الإجراءات</th>
-                                </tr>
-                            </thead>
-                            <tbody id="usersTableBody">
-                                {% for user_id, user_data in users.items() %}
-                                <tr data-user-id="{{ user_id }}">
-                                    <td>
-                                        <code>{{ user_id[:8] }}...</code>
-                                    </td>
-                                    <td>
-                                        <s
+            return jsonify({
+                "success": True, 
+                "message": "✅ تم تسجيل الدخول"
+            })
+
+        elif result["status"] == "code_required":
+            socketio.emit('log_update', {
+                "message": "📱 تم إرسال كود التحقق"
+            }, to=user_id)
+
+            return jsonify({
+                "success": True, 
+                "message": "📱 تم إرسال كود التحقق", 
+                "code_required": True
+            })
+
+        else:
+            error_message = result.get('message', 'خطأ غير معروف')
+            socketio.emit('log_update', {
+                "message": f"❌ {error_message}"
+            }, to=user_id)
+
+            return jsonify({
+                "success": False, 
+                "message": f"❌ {error_message}"
+            })
+
+    except Exception as e:
+        logger.error(f"Login error for user {user_id}: {str(e)}")
+        socketio.emit('log_update', {
+            "message": f"❌ خطأ: {str(e)}"
+        }, to=user_id)
+
+        return jsonify({
+            "success": False, 
+            "message": f"❌ خطأ: {str(e)}"
+        })
+
+@app.route("/api/verify_code", methods=["POST"])
+def api_verify_code():
+    user_id = session['user_id']
+    data = request.json
+
+    if not data:
+        return jsonify({
+            "success": False, 
+            "message": "❌ لم يتم إرسال البيانات"
+        })
+
+    code = data.get('code')
+    password = data.get('password')
+
+    if not code and not password:
+        return jsonify({
+            "success": False, 
+            "message": "❌ يرجى إدخال الكود أو كلمة المرور"
+        })
+
+    try:
+        if code:
+            result = telegram_manager.verify_code(user_id, code)
+        else:
+            result = telegram_manager.verify_password(user_id, password)
+
+        if result["status"] == "success":
+            socketio.emit('log_update', {
+                "message": "✅ تم التحقق بنجاح"
+            }, to=user_id)
+
+            socketio.emit('connection_status', {
+                "status": "connected"
+            }, to=user_id)
+
+            return jsonify({
+                "success": True, 
+                "message": "✅ تم التحقق بنجاح"
+            })
+
+        elif result["status"] == "password_required":
+            return jsonify({
+                "success": True, 
+                "message": result["message"], 
+                "password_required": True
+            })
+
+        else:
+            error_message = result.get('message', 'فشل التحقق')
+            socketio.emit('log_update', {
+                "message": f"❌ {error_message}"
+            }, to=user_id)
+
+            return jsonify({
+                "success": False, 
+                "message": f"❌ {error_message}"
+            })
+
+    except Exception as e:
+        socketio.emit('log_update', {
+            "message": f"❌ خطأ في التحقق: {str(e)}"
+        }, to=user_id)
+
+        return jsonify({
+            "success": False, 
+            "message": f"❌ خطأ: {str(e)}"
+        })
+
+@app.route("/api/save_settings", methods=["POST"])
+def api_save_settings():
+    user_id = session['user_id']
+    data = request.json
+
+    if not data:
+        return jsonify({
+            "success": False, 
+            "message": "❌ لم يتم إرسال البيانات"
+        })
+
+    current_settings = load_settings(user_id)
+    current_settings.update({
+        'message': data.get('message', ''),
+        'groups': [g.strip() for g in data.get('groups', '').split('\n') if g.strip()],
+        'interval_seconds': int(data.get('interval_seconds', 3600)),
+        'watch_words': [w.strip() for w in data.get('watch_words', '').split('\n') if w.strip()],
+        'send_type': data.get('send_type', 'manual'),
+        'max_retries': int(data.get('max_retries', 5)),
+        'auto_reconnect': data.get('auto_reconnect', False)
+    })
+
+    if save_settings(user_id, current_settings):
+        with USERS_LOCK:
+            if user_id in USERS:
+                USERS[user_id]['settings'] = current_settings
+
+        socketio.emit('log_update', {
+            "message": "✅ تم حفظ الإعدادات بنجاح"
+        }, to=user_id)
+
+        return jsonify({
+            "success": True, 
+            "message": "✅ تم حفظ الإعدادات"
+        })
+    else:
+        return jsonify({
+            "success": False, 
+            "message": "❌ فشل في حفظ الإعدادات"
+        })
+
+@app.route("/api/start_monitoring", methods=["POST"])
+def api_start_monitoring():
+    user_id = session['user_id']
+
+    with USERS_LOCK:
+        if user_id not in USERS:
+            return jsonify({
+                "success": False, 
+                "message": "❌ لم يتم إعداد الحساب"
+            })
+
+        if not USERS[user_id].get('authenticated'):
+            return jsonify({
+                "success": False, 
+                "message": "❌ يجب تسجيل الدخول أولاً"
+            })
+
+        if USERS[user_id]['is_running']:
+            return jsonify({
+                "success": False, 
+                "message": "✅ النظام يعمل بالفعل"
+            })
+
+        USERS[user_id]['is_running'] = True
+
+    socketio.emit('log_update', {
+        "message": "🚀 بدء تشغيل نظام المراقبة الفورية..."
+    }, to=user_id)
+
+    try:
+        monitoring_thread = threading.Thread(
+            target=monitoring_worker, 
+            args=(user_id,), 
+            daemon=True
+        )
+        monitoring_thread.start()
+
+        with USERS_LOCK:
+            USERS[user_id]['thread'] = monitoring_thread
+
+        return jsonify({
+            "success": True, 
+            "message": "🚀 بدأت المراقبة الفورية"
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to start monitoring for {user_id}: {str(e)}")
+
+        with USERS_LOCK:
+            USERS[user_id]['is_running'] = False
+
+        return jsonify({
+            "success": False, 
+            "message": f"❌ فشل في بدء المراقبة: {str(e)}"
+        })
+
+@app.route("/api/stop_monitoring", methods=["POST"])
+def api_stop_monitoring():
+    user_id = session['user_id']
+
+    with USERS_LOCK:
+        if user_id in USERS and USERS[user_id]['is_running']:
+            USERS[user_id]['is_running'] = False
+            socketio.emit('log_update', {
+                "message": "⏹ إيقاف نظام المراقبة..."
+            }, to=user_id)
+
+            return jsonify({
+                "success": True, 
+                "message": "⏹ تم إيقاف المراقبة"
+            })
+
+    return jsonify({
+        "success": False, 
+        "message": "❌ النظام غير مشغل"
+    })
+
+@app.route("/api/send_now", methods=["POST"])
+def api_send_now():
+    user_id = session['user_id']
+
+    with USERS_LOCK:
+        if user_id not in USERS:
+            return jsonify({
+                "success": False, 
+                "message": "❌ لم يتم إعداد الحساب"
+            })
+
+        if not USERS[user_id].get('authenticated'):
+            return jsonify({
+                "success": False, 
+                "message": "❌ يجب تسجيل الدخول أولاً"
+            })
+
+        settings = USERS[user_id]['settings']
+
+    groups = settings.get('groups', [])
+    message = settings.get('message', '')
+
+    if not groups or not message:
+        return jsonify({
+            "success": False, 
+            "message": "❌ يرجى تحديد المجموعات والرسالة"
+        })
+
+    socketio.emit('log_update', {
+        "message": f"🚀 بدء الإرسال الفوري إلى {len(groups)} مجموعة"
+    }, to=user_id)
+
+    def send_messages():
+        try:
+            successful = 0
+            failed = 0
+
+            for i, group in enumerate(groups, 1):
+                try:
+                    result = telegram_manager.send_message_async(user_id, group, message)
+
+                    socketio.emit('log_update', {
+                        "message": f"✅ [{i}/{len(groups)}] نجح إلى: {group}"
+                    }, to=user_id)
+
+                    successful += 1
+                    with USERS_LOCK:
+                        if user_id in USERS:
+                            USERS[user_id]['stats']['sent'] += 1
+
+                    socketio.emit('stats_update', USERS[user_id]['stats'], to=user_id)
+
+                    if i < len(groups):
+                        time.sleep(3)
+
+                except Exception as e:
+                    error_msg = str(e)
+                    if "banned" in error_msg.lower():
+                        error_type = "محظور"
+                    elif "private" in error_msg.lower():
+                        error_type = "خاص/محدود"
+                    elif "can't write" in error_msg.lower():
+                        error_type = "غير مسموح"
+                    else:
+                        error_type = "خطأ"
+
+                    logger.error(f"Send error to {group}: {error_msg}")
+                    socketio.emit('log_update', {
+                        "message": f"❌ [{i}/{len(groups)}] فشل إلى {group}: {error_type}"
+                    }, to=user_id)
+
+                    failed += 1
+                    with USERS_LOCK:
+                        if user_id in USERS:
+                            USERS[user_id]['stats']['errors'] += 1
+
+                    socketio.emit('stats_update', USERS[user_id]['stats'], to=user_id)
+
+            # ملخص نهائي
+            socketio.emit('log_update', {
+                "message": f"📊 انتهى الإرسال الفوري: ✅ {successful} نجح | ❌ {failed} فشل"
+            }, to=user_id)
+
+        except Exception as e:
+            logger.error(f"Send thread error: {str(e)}")
+
+    threading.Thread(target=send_messages, daemon=True).start()
+
+    return jsonify({
+        "success": True, 
+        "message": f"🚀 بدأ إرسال {len(groups)} رسالة"
+    })
+
+@app.route("/api/get_stats", methods=["GET"])
+def api_get_stats():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"sent": 0, "errors": 0})
+
+    with USERS_LOCK:
+        if user_id in USERS:
+            return jsonify(USERS[user_id]['stats'])
+
+    return jsonify({"sent": 0, "errors": 0})
+
+@app.route("/api/get_login_status", methods=["GET"])
+def api_get_login_status():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"logged_in": False, "connected": False})
+
+    with USERS_LOCK:
+        if user_id in USERS:
+            return jsonify({
+                "logged_in": USERS[user_id].get('authenticated', False), 
+                "connected": USERS[user_id].get('connected', False),
+                "is_running": USERS[user_id].get('is_running', False)
+            })
+
+    return jsonify({"logged_in": False, "connected": False, "is_running": False})
+
+@app.route("/api/reset_login", methods=["POST"])
+def api_reset_login():
+    user_id = session['user_id']
+
+    with USERS_LOCK:
+        if user_id in USERS:
+            if USERS[user_id]['is_running']:
+                USERS[user_id]['is_running'] = False
+
+            client_manager = USERS[user_id].get('client_manager')
+            if client_manager:
+                client_manager.stop()
+
+            del USERS[user_id]
+
+    session_file = os.path.join(SESSIONS_DIR, f"{user_id}_session.session")
+    if os.path.exists(session_file):
+        try:
+            os.remove(session_file)
+        except Exception as e:
+            logger.error(f"Failed to remove session file: {str(e)}")
+
+    socketio.emit('log_update', {
+        "message": "🔄 إعادة تعيين جلسة تسجيل الدخول"
+    }, to=user_id)
+
+    socketio.emit('connection_status', {
+        "status": "disconnected"
+    }, to=user_id)
+
+    return jsonify({
+        "success": True, 
+        "message": "✅ تم إعادة التعيين"
+    })
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    user_id = session['user_id']
+
+    with USERS_LOCK:
+        if user_id in USERS:
+            if USERS[user_id]['is_running']:
+                USERS[user_id]['is_running'] = False
+
+            client_manager = USERS[user_id].get('client_manager')
+            if client_manager:
+                try:
+                    client_manager.run_coroutine(client_manager.client.log_out())
+                except:
+                    pass
+                client_manager.stop()
+
+            del USERS[user_id]
+
+    session_file = os.path.join(SESSIONS_DIR, f"{user_id}_session.session")
+    settings_file = os.path.join(SESSIONS_DIR, f"{user_id}.json")
+
+    for file_path in [session_file, settings_file]:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.error(f"Failed to remove file {file_path}: {str(e)}")
+
+    return jsonify({
+        "success": True, 
+        "message": "✅ تم تسجيل الخروج"
+    })
+
+# ===========================
+# Admin API
+# ===========================
+@app.route("/api/admin/get_users", methods=["GET"])
+def api_admin_get_users():
+    if not session.get('is_admin'):
+        return jsonify({"success": False, "message": "غير مصرح"})
+
+    with USERS_LOCK:
+        users_data = {}
+        for user_id, data in USERS.items():
+            users_data[user_id] = {
+                'settings': data['settings'],
+                'is_running': data['is_running'],
+                'stats': data['stats'],
+                'connected': data.get('connected', False),
+                'authenticated': data.get('authenticated', False)
+            }
+
+    return jsonify({"success": True, "users": users_data})
+
+@app.route("/api/admin/stop_user/<user_id>", methods=["POST"])
+def api_admin_stop_user(user_id):
+    if not session.get('is_admin'):
+        return jsonify({"success": False, "message": "غير مصرح"})
+
+    with USERS_LOCK:
+        if user_id in USERS:
+            USERS[user_id]['is_running'] = False
+            return jsonify({
+                "success": True, 
+                "message": f"تم إيقاف المستخدم {user_id}"
+            })
+
+    return jsonify({"success": False, "message": "المستخدم غير موجود"})
+
+# تحميل الجلسات عند بدء التطبيق
+load_all_sessions()
+
+if __name__ == "__main__":
+    logger.info("🚀 Starting enhanced Telegram automation system...")
+    socketio.run(
+        app, 
+        host="0.0.0.0", 
+        port=5000, 
+        debug=False,
+        use_reloader=False
+        )
