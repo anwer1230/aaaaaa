@@ -765,7 +765,7 @@ def api_verify_code():
         else:
             error_message = result.get('message', 'فشل التحقق')
             socketio.emit('log_update', {
-                "message": f"❌ {error_message}
+                "message": f"❌ {error_message}" 
             }, to=user_id)
 
             return jsonify({
