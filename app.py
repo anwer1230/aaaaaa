@@ -1,7 +1,3 @@
-# تطبيق monkey patch في بداية الملف قبل أي استيرادات أخرى
-import eventlet
-eventlet.monkey_patch()
-
 import os
 import json
 import uuid
@@ -20,34 +16,33 @@ from telethon.sessions import StringSession
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# إنشاء التطبيق مع تغيير مسار القوالب إلى المجلد الرئيسي
+# إنشاء التطبيق
 app = Flask(__name__, template_folder='.')
 app.secret_key = os.environ.get("SESSION_SECRET", os.urandom(24))
 
-# إعداد SocketIO مع async_mode='eventlet'
+# إعداد SocketIO
 socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
-    async_mode='eventlet',
+    async_mode='threading',
     ping_timeout=60, 
     ping_interval=30,
-    logger=True,
-    engineio_logger=True
+    logger=False, 
+    engineio_logger=False
 )
 
 # إعدادات النظام
 SESSIONS_DIR = "sessions"
 if not os.path.exists(SESSIONS_DIR):
     os.makedirs(SESSIONS_DIR)
-    logger.info(f"Created sessions directory: {SESSIONS_DIR}")
 
 USERS = {}
 USERS_LOCK = Lock()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 # بيانات Telegram API
-API_ID = os.environ.get('TELEGRAM_API_ID', '123456')
-API_HASH = os.environ.get('TELEGRAM_API_HASH', 'abcdef123456')
+API_ID = os.environ.get('TELEGRAM_API_ID')
+API_HASH = os.environ.get('TELEGRAM_API_HASH')
 
 if not API_ID or not API_HASH:
     logger.error("❌ يجب إضافة TELEGRAM_API_ID و TELEGRAM_API_HASH في متغيرات البيئة")
@@ -83,53 +78,35 @@ def load_all_sessions():
     logger.info("Loading existing sessions...")
     session_count = 0
 
-    try:
-        # إنشاء مجلد الجلسات إذا لم يكن موجودًا
-        if not os.path.exists(SESSIONS_DIR):
-            os.makedirs(SESSIONS_DIR)
-            logger.info(f"Created sessions directory: {SESSIONS_DIR}")
-            return 0
-
-        with USERS_LOCK:
+    with USERS_LOCK:
+        try:
             for filename in os.listdir(SESSIONS_DIR):
-                if filename.endswith('.session'):
-                    user_id = filename.replace('_session.session', '')
-                    try:
-                        # تحميل الجلسة من ملف session
-                        session_file = os.path.join(SESSIONS_DIR, filename)
-                        with open(session_file, 'r') as f:
-                            session_string = f.read().strip()
-                        
-                        if session_string:
-                            settings = load_settings(user_id)
-                            if not settings:
-                                settings = {'phone': 'مخزن مسبقاً'}
-                            
-                            USERS[user_id] = {
-                                'client': None,
-                                'settings': settings,
-                                'thread': None,
-                                'is_running': False,
-                                'stats': {"sent": 0, "errors": 0},
-                                'connected': False,
-                                'authenticated': True,  # تم المصادقة مسبقاً
-                                'awaiting_code': False,
-                                'awaiting_password': False,
-                                'phone_code_hash': None,
-                                'loop': None,
-                                'client_thread': None,
-                                'last_scheduled_send': 0,
-                                'monitoring_active': False,
-                                'message_handler': None,
-                                'session_string': session_string
-                            }
-                            session_count += 1
-                            logger.info(f"✓ Loaded session for {user_id}")
-                    except Exception as e:
-                        logger.error(f"Error loading session file {filename}: {str(e)}")
+                if filename.endswith('.json'):
+                    user_id = filename.split('.')[0]
+                    settings = load_settings(user_id)
 
-    except Exception as e:
-        logger.error(f"Error loading sessions: {str(e)}")
+                    if settings and 'phone' in settings:
+                        USERS[user_id] = {
+                            'client': None,
+                            'settings': settings,
+                            'thread': None,
+                            'is_running': False,
+                            'stats': {"sent": 0, "errors": 0},
+                            'connected': False,
+                            'authenticated': False,
+                            'awaiting_code': False,
+                            'awaiting_password': False,
+                            'phone_code_hash': None,
+                            'loop': None,
+                            'client_thread': None,
+                            'last_scheduled_send': 0,
+                            'monitoring_active': False
+                        }
+                        session_count += 1
+                        logger.info(f"✓ Loaded session for {user_id}")
+
+        except Exception as e:
+            logger.error(f"Error loading sessions: {str(e)}")
 
     logger.info(f"Loaded {session_count} sessions successfully")
     return session_count
@@ -148,39 +125,33 @@ class TelegramClientManager:
         self.stop_flag = threading.Event()
         self.is_ready = threading.Event()
 
-    def start_client_thread(self, session_string=None):
+    def start_client_thread(self):
         """بدء thread منفصل للعميل"""
         if self.thread and self.thread.is_alive():
             return
 
         self.stop_flag.clear()
         self.is_ready.clear()
-        self.thread = threading.Thread(target=self._run_client_loop, daemon=True, args=(session_string,))
+        self.thread = threading.Thread(target=self._run_client_loop, daemon=True)
         self.thread.start()
 
         # انتظار حتى يصبح العميل جاهزاً
         if not self.is_ready.wait(timeout=30):
             raise Exception("Client initialization timeout")
 
-    def _run_client_loop(self, session_string=None):
+    def _run_client_loop(self):
         """تشغيل event loop للعميل"""
         try:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
-            # استخدام جلسة سابقة إذا كانت متاحة
-            if session_string:
-                session = StringSession(session_string)
-            else:
-                session = StringSession()
-                
-            self.client = TelegramClient(session, int(API_ID), API_HASH, loop=self.loop)
+            session_file = os.path.join(SESSIONS_DIR, f"{self.user_id}_session.session")
+            self.client = TelegramClient(session_file, int(API_ID), API_HASH)
 
             self.loop.run_until_complete(self._client_main())
 
         except Exception as e:
-            logger.error(f"Client thread error for {self.user_id}: {str(e)}")
-            self.is_ready.set()  # تأكد من أن is_ready مضبوط حتى في حالة الخطأ
+            logger.error(f"Client thread error for {user_id}: {str(e)}")
         finally:
             if self.loop:
                 self.loop.close()
@@ -190,7 +161,6 @@ class TelegramClientManager:
         try:
             await self.client.connect()
             self.is_ready.set()
-            logger.info(f"Client connected for user {self.user_id}")
 
             while not self.stop_flag.is_set():
                 await asyncio.sleep(1)
@@ -198,13 +168,12 @@ class TelegramClientManager:
         except Exception as e:
             logger.error(f"Client main error: {str(e)}")
         finally:
-            if self.client:
-                await self.client.disconnect()
+            await self.client.disconnect()
 
     def run_coroutine(self, coro):
         """تشغيل coroutine في event loop الخاص بالعميل"""
-        if not self.loop or not self.is_ready.is_set():
-            raise Exception("Event loop not initialized or client not ready")
+        if not self.loop:
+            raise Exception("Event loop not initialized")
 
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return future.result(timeout=30)
@@ -234,65 +203,33 @@ class TelegramManager:
         """إعداد عميل التليجرام"""
         try:
             if not API_ID or not API_HASH:
-                logger.error("API_ID or API_HASH not set")
                 return {
                     "status": "error", 
                     "message": "❌ بيانات API غير متوفرة"
                 }
 
             client_manager = self.get_client_manager(user_id)
-            
-            # التحقق إذا كانت هناك جلسة مخزنة مسبقاً
-            session_string = None
-            with USERS_LOCK:
-                if user_id in USERS and 'session_string' in USERS[user_id]:
-                    session_string = USERS[user_id]['session_string']
-            
-            client_manager.start_client_thread(session_string)
+            client_manager.start_client_thread()
 
-            # الانتظار حتى يكون العميل جاهزاً
-            if not client_manager.is_ready.wait(timeout=30):
-                return {
-                    "status": "error", 
-                    "message": "❌ انتهت مهلة الاتصال بالتليجرام"
-                }
-
-            is_authorized = False
-            try:
-                is_authorized = client_manager.run_coroutine(
-                    client_manager.client.is_user_authorized()
-                )
-            except Exception as e:
-                logger.error(f"Authorization check error: {str(e)}")
-                return {
-                    "status": "error", 
-                    "message": f"❌ خطأ في التحقق من الصلاحية: {str(e)}"
-                }
+            is_authorized = client_manager.run_coroutine(
+                client_manager.client.is_user_authorized()
+            )
 
             if not is_authorized:
-                try:
-                    sent = client_manager.run_coroutine(
-                        client_manager.client.send_code_request(phone_number)
-                    )
-                    logger.info(f"Verification code sent to {phone_number}")
+                sent = client_manager.run_coroutine(
+                    client_manager.client.send_code_request(phone_number)
+                )
 
-                    with USERS_LOCK:
-                        if user_id in USERS:
-                            USERS[user_id]['awaiting_code'] = True
-                            USERS[user_id]['phone_code_hash'] = sent.phone_code_hash
-                            USERS[user_id]['client_manager'] = client_manager
+                with USERS_LOCK:
+                    if user_id in USERS:
+                        USERS[user_id]['awaiting_code'] = True
+                        USERS[user_id]['phone_code_hash'] = sent.phone_code_hash
+                        USERS[user_id]['client_manager'] = client_manager
 
-                    return {
-                        "status": "code_required", 
-                        "message": "📱 تم إرسال كود التحقق"
-                    }
-
-                except Exception as e:
-                    logger.error(f"Send code error: {str(e)}")
-                    return {
-                        "status": "error", 
-                        "message": f"❌ فشل إرسال كود التحقق: {str(e)}"
-                    }
+                return {
+                    "status": "code_required", 
+                    "message": "📱 تم إرسال كود التحقق"
+                }
             else:
                 with USERS_LOCK:
                     if user_id in USERS:
@@ -321,9 +258,8 @@ class TelegramManager:
                 return {"status": "error", "message": "❌ بيانات الجلسة مفقودة"}
 
             try:
-                # استخدام sign_in بدلاً من sign_in
                 user = client_manager.run_coroutine(
-                    client_manager.client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+                    client_manager.client.sign_in(phone, code, phone_code_hash=phone_code_hash)
                 )
 
                 with USERS_LOCK:
@@ -331,14 +267,6 @@ class TelegramManager:
                     USERS[user_id]['authenticated'] = True
                     USERS[user_id]['awaiting_code'] = False
                     USERS[user_id]['awaiting_password'] = False
-
-                # حفظ جلسة التسجيل
-                session_string = client_manager.run_coroutine(
-                    client_manager.client.session.save()
-                )
-                session_file = os.path.join(SESSIONS_DIR, f"{user_id}_session.session")
-                with open(session_file, "w") as f:
-                    f.write(session_string)
 
                 return {"status": "success", "message": "✅ تم التحقق بنجاح"}
 
@@ -373,7 +301,6 @@ class TelegramManager:
                 return {"status": "error", "message": "❌ بيانات الجلسة مفقودة"}
 
             try:
-                # استخدام كلمة المرور للتسجيل
                 await_result = client_manager.run_coroutine(
                     client_manager.client.sign_in(password=password)
                 )
@@ -382,14 +309,6 @@ class TelegramManager:
                     USERS[user_id]['connected'] = True
                     USERS[user_id]['authenticated'] = True
                     USERS[user_id]['awaiting_password'] = False
-
-                # حفظ جلسة التسجيل
-                session_string = client_manager.run_coroutine(
-                    client_manager.client.session.save()
-                )
-                session_file = os.path.join(SESSIONS_DIR, f"{user_id}_session.session")
-                with open(session_file, "w") as f:
-                    f.write(session_string)
 
                 return {"status": "success", "message": "✅ تم التحقق بنجاح"}
 
@@ -400,123 +319,136 @@ class TelegramManager:
             logger.error(f"Password verification error: {str(e)}")
             return {"status": "error", "message": f"❌ خطأ: {str(e)}"}
 
+    def send_message_async(self, user_id, entity, message):
+        """إرسال رسالة"""
+        try:
+            with USERS_LOCK:
+                if user_id not in USERS:
+                    raise Exception("المستخدم غير موجود")
+
+                client_manager = USERS[user_id].get('client_manager')
+
+            if not client_manager:
+                raise Exception("العميل غير متصل")
+
+            is_authorized = client_manager.run_coroutine(
+                client_manager.client.is_user_authorized()
+            )
+
+            if not is_authorized:
+                raise Exception("العميل غير مصرح")
+
+            try:
+                entity_obj = client_manager.run_coroutine(
+                    client_manager.client.get_entity(entity)
+                )
+            except:
+                if not entity.startswith('@') and not entity.startswith('https://'):
+                    entity = '@' + entity
+                entity_obj = client_manager.run_coroutine(
+                    client_manager.client.get_entity(entity)
+                )
+
+            result = client_manager.run_coroutine(
+                client_manager.client.send_message(entity_obj, message)
+            )
+
+            return {"success": True, "message_id": result.id}
+
+        except Exception as e:
+            logger.error(f"Send message error: {str(e)}")
+            raise Exception(str(e))
+
 # إنشاء مدير التليجرام
 telegram_manager = TelegramManager()
 
 # ===========================
 # نظام المراقبة الفورية واللحظية
 # ===========================
-def setup_message_handler(user_id):
-    """إعداد معالج الرسائل للمراقبة الفورية"""
-    try:
-        with USERS_LOCK:
-            if user_id not in USERS:
-                return False
-                
-            client_manager = USERS[user_id].get('client_manager')
-            if not client_manager:
-                return False
-                
-            settings = USERS[user_id]['settings']
-            watch_words = settings.get('watch_words', [])
-            
-            if not watch_words:
-                return False
-                
-            # إضافة معالج الأحداث للرسائل الجديدة
-            @client_manager.client.on(events.NewMessage(incoming=True))
-            async def handler(event):
-                try:
-                    message_text = event.message.text or ""
-                    sender = await event.get_sender()
-                    chat = await event.get_chat()
-                    
-                    # التحقق من وجود كلمات مراقبة في الرسالة
-                    for keyword in watch_words:
-                        if keyword.lower() in message_text.lower():
-                            # إرسال تنبيه إلى المحادثة الخاصة
-                            alert_message = f"🚨 تنبيه مراقبة - كلمة مفتاحية: {keyword}\n\n"
-                            alert_message += f"📝 النص: {message_text[:200]}...\n\n"
-                            alert_message += f"👤 المرسل: {getattr(sender, 'first_name', '') or getattr(sender, 'username', '') or 'غير معروف'}\n"
-                            alert_message += f"💬 الدردشة: {getattr(chat, 'title', '') or getattr(chat, 'username', '') or 'خاص'}\n"
-                            alert_message += f"🕐 الوقت: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                            
-                            # إرسال التنبيه إلى المحادثة المحفوظة
-                            await client_manager.client.send_message('me', alert_message)
-                            
-                            # إرسال التنبيه إلى الواجهة عبر SocketIO
-                            socketio.emit('keyword_alert', {
-                                "keyword": keyword,
-                                "message": message_text[:200],
-                                "sender": getattr(sender, 'first_name', '') or getattr(sender, 'username', '') or 'غير معروف',
-                                "chat": getattr(chat, 'title', '') or getattr(chat, 'username', '') or 'خاص',
-                                "timestamp": time.strftime('%H:%M:%S')
-                            }, to=user_id)
-                            
-                            break
-                            
-                except Exception as e:
-                    logger.error(f"Error in message handler for {user_id}: {str(e)}")
-            
-            # حفظ المرجع إلى المعالج
-            USERS[user_id]['message_handler'] = handler
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error setting up message handler for {user_id}: {str(e)}")
-        return False
-
 def monitoring_worker(user_id):
-    """مهمة المراقبة الفورية والمستمرة"""
-    logger.info(f"Starting instant real-time monitoring for user {user_id}")
+    """مهمة المراقبة الفورية والمستمرة - بدون توقيتات محددة"""
+    logger.info(f"Starting instant real-time monitoring worker for user {user_id}")
+
+    consecutive_errors = 0
+    max_consecutive_errors = 5
 
     try:
         # تهيئة متغيرات المراقبة الفورية
         with USERS_LOCK:
             if user_id in USERS:
+                USERS[user_id]['last_keyword_check'] = 0  # بدء فوري
                 USERS[user_id]['monitoring_active'] = True
-                settings = USERS[user_id]['settings'].copy()
-                client_manager = USERS[user_id].get('client_manager')
-
-        if not client_manager:
-            logger.error(f"No client manager for user {user_id}")
-            return
-
-        # إعداد معالج الرسائل للمراقبة الفورية
-        if not setup_message_handler(user_id):
-            logger.error(f"Failed to setup message handler for user {user_id}")
-            return
 
         # إرسال إشعار بدء المراقبة الفورية
         socketio.emit('log_update', {
-            "message": "🚀 بدأت المراقبة الفورية - سيتم إرسال التنبيهات فور وصول أي رسالة تحتوي على الكلمات المراقبة"
+            "message": "🚀 بدأت المراقبة الفورية واللحظية - سيتم إرسال التنبيهات فور وصول أي رسالة تحتوي على الكلمات المراقبة"
         }, to=user_id)
 
-        # البقاء في الحلقة للمراقبة المستمرة
         while True:
             with USERS_LOCK:
                 if user_id not in USERS or not USERS[user_id]['is_running']:
-                    logger.info(f"Stopping monitoring for user {user_id}")
+                    logger.info(f"Stopping instant monitoring for user {user_id}")
                     break
 
-            # إرسال إشارة حياة للمراقبة
-            status_info = {
-                'timestamp': time.strftime('%H:%M:%S'),
-                'status': 'active',
-                'type': 'instant_monitoring'
-            }
+                user_data = USERS[user_id].copy()
+                USERS[user_id]['monitoring_active'] = True
 
-            socketio.emit('heartbeat', status_info, to=user_id)
-            
-            # انتظار قصير جداً لتجنب استهلاك CPU عالي
-            time.sleep(1)
+            try:
+                settings = user_data['settings']
+                send_type = settings.get('send_type', 'manual')
+                current_time = time.time()
+
+                # المراقبة الفورية للكلمات المفتاحية (بدون انتظار)
+                watch_words = settings.get('watch_words', [])
+                if watch_words:
+                    logger.info(f"Executing INSTANT keyword monitoring for user {user_id}")
+                    execute_instant_keyword_monitoring(user_id, settings)
+
+                # تنفيذ الإرسال المجدول إذا كان مطلوب
+                if send_type == 'scheduled':
+                    interval_seconds = int(settings.get('interval_seconds', 3600))
+                    last_send = user_data.get('last_scheduled_send', 0)
+
+                    if current_time - last_send >= interval_seconds:
+                        logger.info(f"Executing scheduled send for user {user_id}")
+                        execute_scheduled_messages(user_id, settings)
+
+                        with USERS_LOCK:
+                            if user_id in USERS:
+                                USERS[user_id]['last_scheduled_send'] = current_time
+
+                consecutive_errors = 0
+
+                # إرسال إشارة حياة للمراقبة الفورية
+                status_info = {
+                    'timestamp': time.strftime('%H:%M:%S'),
+                    'status': 'active',
+                    'type': 'instant_monitoring',  # نوع جديد للمراقبة الفورية
+                    'keywords_active': bool(watch_words),
+                    'instant': True  # تأكيد أن المراقبة فورية
+                }
+
+                socketio.emit('heartbeat', status_info, to=user_id)
+
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"Instant monitoring cycle error for {user_id}: {str(e)}")
+
+                socketio.emit('log_update', {
+                    "message": f"⚠️ خطأ في المراقبة الفورية: {str(e)[:100]}"
+                }, to=user_id)
+
+                if consecutive_errors >= max_consecutive_errors:
+                    socketio.emit('log_update', {
+                        "message": f"❌ تم إيقاف المراقبة بسبب تكرار الأخطاء ({consecutive_errors})"
+                    }, to=user_id)
+                    break
+
+            # فترة انتظار قصيرة جداً للمراقبة الفورية (2 ثانية فقط)
+            time.sleep(2)  # أقصر فترة انتظار للاستجابة الفورية
 
     except Exception as e:
-        logger.error(f"Monitoring worker error for {user_id}: {str(e)}")
-        socketio.emit('log_update', {
-            "message": f"❌ خطأ في المراقبة: {str(e)}"
-        }, to=user_id)
+        logger.error(f"Instant monitoring worker error for {user_id}: {str(e)}")
     finally:
         with USERS_LOCK:
             if user_id in USERS:
@@ -533,7 +465,138 @@ def monitoring_worker(user_id):
             'status': 'stopped'
         }, to=user_id)
 
-        logger.info(f"Monitoring worker ended for user {user_id}")
+        logger.info(f"Instant monitoring worker ended for user {user_id}")
+
+def execute_instant_keyword_monitoring(user_id, settings):
+    """تنفيذ مراقبة الكلمات المفتاحية الفورية واللحظية - بدون توقيتات"""
+    watch_words = settings.get('watch_words', [])
+    groups = settings.get('groups', [])
+
+    if not watch_words:
+        return
+
+    if not groups:
+        return
+
+    try:
+        with USERS_LOCK:
+            client_manager = USERS[user_id].get('client_manager')
+            last_check_time = USERS[user_id].get('last_keyword_check', 0)
+
+        if not client_manager:
+            return
+
+        current_time = time.time()
+        detected_keywords = 0
+        checked_groups = 0
+
+        # فحص كل مجموعة للكلمات المفتاحية بشكل فوري
+        for group in groups:  # فحص جميع المجموعات بدون حد
+            try:
+                # تنظيف اسم المجموعة
+                clean_group = group.strip()
+                if not clean_group.startswith('@') and not clean_group.startswith('https://'):
+                    clean_group = '@' + clean_group
+
+                entity_obj = client_manager.run_coroutine(
+                    client_manager.client.get_entity(clean_group)
+                )
+
+                # جلب آخر 50 رسالة للمراقبة الفورية
+                messages = client_manager.run_coroutine(
+                    client_manager.client.get_messages(entity_obj, limit=50)
+                )
+
+                checked_groups += 1
+
+                for msg in messages:
+                    if msg.text and msg.date:
+                        msg_time = msg.date.timestamp()
+
+                        # فحص الرسائل الجديدة فقط (أحدث من آخر فحص)
+                        if msg_time > last_check_time:
+                            msg_lower = msg.text.lower()
+
+                            for keyword in watch_words:
+                                keyword_lower = keyword.lower().strip()
+                                if keyword_lower and keyword_lower in msg_lower:
+                                    detected_keywords += 1
+
+                                    # الحصول على معلومات المرسل
+                                    sender_name = "غير معروف"
+                                    try:
+                                        if msg.sender:
+                                            sender_name = getattr(msg.sender, 'first_name', '') or getattr(msg.sender, 'username', '') or str(msg.sender.id)
+                                    except:
+                                        pass
+
+                                    # إشعار فوري ومفصل
+                                    alert_data = {
+                                        "keyword": keyword,
+                                        "group": clean_group,
+                                        "message": msg.text[:200] + "..." if len(msg.text) > 200 else msg.text,
+                                        "timestamp": time.strftime('%H:%M:%S'),
+                                        "sender": sender_name,
+                                        "message_time": time.strftime('%H:%M:%S', time.localtime(msg_time)),
+                                        "message_id": msg.id
+                                    }
+
+                                    socketio.emit('keyword_alert', alert_data, to=user_id)
+
+                                    socketio.emit('log_update', {
+                                        "message": f"🚨 تنبيه فوري: '{keyword}' في {clean_group} من {sender_name}"
+                                    }, to=user_id)
+
+                                    # إرسال تنبيه للرسائل المحفوظة فوراً
+                                    try:
+                                        notification_msg = f"""🚨 تنبيه فوري - مراقبة الكلمات المفتاحية
+
+📝 الكلمة المراقبة: {keyword}
+📊 المجموعة: {clean_group}
+👤 المرسل: {sender_name}
+🕐 وقت الرسالة: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(msg_time))}
+🔗 معرف الرسالة: {msg.id}
+
+💬 نص الرسالة:
+{msg.text[:500]}{'...' if len(msg.text) > 500 else ''}
+
+---
+تنبيه فوري من نظام المراقبة اللحظية"""
+
+                                        client_manager.run_coroutine(
+                                            client_manager.client.send_message('me', notification_msg)
+                                        )
+
+                                        logger.info(f"Sent INSTANT keyword alert to saved messages for user {user_id}")
+
+                                    except Exception as save_error:
+                                        logger.error(f"Failed to send instant alert to saved messages: {str(save_error)}")
+
+                # بدون تأخير بين المجموعات للمراقبة الفورية
+
+            except Exception as group_error:
+                logger.error(f"Instant keyword monitoring error for {group}: {str(group_error)}")
+
+        # تحديث وقت آخر فحص
+        with USERS_LOCK:
+            if user_id in USERS:
+                USERS[user_id]['last_keyword_check'] = current_time
+
+        # إحصائيات مبسطة للمراقبة الفورية
+        if detected_keywords > 0:
+            socketio.emit('log_update', {
+                "message": f"🎯 عُثر على {detected_keywords} تطابق فوري في {checked_groups} مجموعة"
+            }, to=user_id)
+
+        logger.info(f"Instant keyword monitoring completed for {user_id}: {detected_keywords} matches found instantly")
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Instant keyword monitoring error for {user_id}: {error_msg}")
+
+def execute_keyword_monitoring(user_id, settings):
+    """وظيفة للتوافق مع النظام القديم - تستدعي المراقبة الفورية"""
+    execute_instant_keyword_monitoring(user_id, settings)
 
 # ===========================
 # أحداث Socket.IO
@@ -552,14 +615,8 @@ def handle_connect():
                     "status": "connected" if connected else "disconnected"
                 })
 
-        # إرسال رسالة ترحيب إلى وحدة التحكم
         emit('console_log', {
             "message": f"[{time.strftime('%H:%M:%S')}] INFO: Socket connected"
-        })
-        
-        # إرسال رسالة ترحيب إلى سجل النشاط
-        emit('log_update', {
-            "message": f"[{time.strftime('%H:%M:%S')}] تم الاتصال بالخادم"
         })
 
 @socketio.on('disconnect')
@@ -568,11 +625,6 @@ def handle_disconnect():
         user_id = session['user_id']
         leave_room(user_id)
         logger.info(f"User {user_id} disconnected from socket")
-        
-        # إرسال رسالة انفصال إلى سجل النشاط
-        emit('log_update', {
-            "message": f"[{time.strftime('%H:%M:%S')}] تم قطع الاتصال بالخادم"
-        }, to=user_id)
 
 # ===========================
 # المسارات الأساسية
@@ -593,7 +645,7 @@ def index():
             connection_status = "connected" if connected else "disconnected"
 
     # إضافة عنوان التطبيق
-    app_title = "مركز سرعة انجاز"
+    app_title = "مركز سرعة انجاز 📚للخدمات الطلابية والاكاديمية"
     whatsapp_link = "https://wa.me/+966510349663"
 
     return render_template('index.html', 
@@ -643,29 +695,19 @@ def api_save_login():
     user_id = session['user_id']
     data = request.json
 
-    logger.info(f"Received login request from user {user_id}: {data}")
-
     if not data or not data.get('phone'):
-        logger.warning("No phone number provided")
         return jsonify({
             "success": False, 
             "message": "❌ يرجى إدخال رقم الهاتف"
         })
 
-    phone_number = data.get('phone')
-    password = data.get('password', '')
-
-    # تنظيف رقم الهاتف (إزالة أي مسافات أو أحرف غير رقمية)
-    phone_number = ''.join(filter(str.isdigit, phone_number))
-
     settings = {
-        'phone': phone_number,
-        'password': password,
+        'phone': data.get('phone'),
+        'password': data.get('password', ''),
         'login_time': time.time()
     }
 
     if not save_settings(user_id, settings):
-        logger.error("Failed to save settings")
         return jsonify({
             "success": False, 
             "message": "❌ فشل في حفظ البيانات"
@@ -690,12 +732,10 @@ def api_save_login():
                 'phone_code_hash': None,
                 'client_manager': None,
                 'last_scheduled_send': 0,
-                'monitoring_active': False,
-                'message_handler': None
+                'monitoring_active': False
             }
 
-        result = telegram_manager.setup_client(user_id, phone_number)
-        logger.info(f"Login result for {user_id}: {result}")
+        result = telegram_manager.setup_client(user_id, settings['phone'])
 
         if result["status"] == "success":
             socketio.emit('log_update', {
@@ -724,7 +764,6 @@ def api_save_login():
 
         else:
             error_message = result.get('message', 'خطأ غير معروف')
-            logger.error(f"Login error: {error_message}")
             socketio.emit('log_update', {
                 "message": f"❌ {error_message}"
             }, to=user_id)
@@ -880,7 +919,7 @@ def api_start_monitoring():
         USERS[user_id]['is_running'] = True
 
     socketio.emit('log_update', {
-        "message": "🚀 بدء تشغيل نظام المراقبة الفورية..."
+        "message": "🚀 بدء تشغيل نظام المراقبة المحسن..."
     }, to=user_id)
 
     try:
@@ -896,7 +935,7 @@ def api_start_monitoring():
 
         return jsonify({
             "success": True, 
-            "message": "🚀 بدأت المراقبة الفورية"
+            "message": "🚀 بدأت المراقبة المحسنة"
         })
 
     except Exception as e:
@@ -1161,12 +1200,11 @@ def api_admin_stop_user(user_id):
 load_all_sessions()
 
 if __name__ == "__main__":
-    with app.app_context():
-        logger.info("🚀 Starting enhanced Telegram automation system...")
-        socketio.run(
-            app, 
-            host="0.0.0.0", 
-            port=5000, 
-            debug=True,
-            use_reloader=False
-    )
+    logger.info("🚀 Starting enhanced Telegram automation system...")
+    socketio.run(
+        app, 
+        host="0.0.0.0", 
+        port=5000, 
+        debug=False,
+        use_reloader=False
+)
