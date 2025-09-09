@@ -6,7 +6,7 @@ import logging
 import asyncio
 import threading
 from threading import Lock
-from flask import Flask, session, request, render_template, jsonify, redirect
+from flask import Flask, session, request, render_template, jsonify, redirect, send_from_directory
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError, PasswordHashInvalidError
@@ -16,7 +16,7 @@ from telethon.sessions import StringSession
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# إنشاء التطبيق
+# إنشاء التطبيق مع مسار القوالب في المجلد الرئيسي
 app = Flask(__name__, template_folder='.')
 app.secret_key = os.environ.get("SESSION_SECRET", os.urandom(24))
 
@@ -151,7 +151,7 @@ class TelegramClientManager:
             self.loop.run_until_complete(self._client_main())
 
         except Exception as e:
-            logger.error(f"Client thread error for {user_id}: {str(e)}")
+            logger.error(f"Client thread error for {self.user_id}: {str(e)}")
         finally:
             if self.loop:
                 self.loop.close()
@@ -675,17 +675,30 @@ def admin():
 def admin_login():
     if request.method == "GET":
         return render_template('admin_login.html')
+    
+    # إذا كان الطلب يحتوي على JSON (من AJAX)
+    if request.is_json:
+        data = request.get_json()
+        password = data.get('password')
+    else:
+        password = request.form.get('password')
 
-    if request.form.get('password') == ADMIN_PASSWORD:
+    if password == ADMIN_PASSWORD:
         session['is_admin'] = True
-        return redirect('/admin')
-
-    return render_template('admin_login.html', error="كلمة المرور غير صحيحة")
+        if request.is_json:
+            return jsonify({"success": True, "message": "تم تسجيل الدخول بنجاح"})
+        else:
+            return redirect('/admin')
+    else:
+        if request.is_json:
+            return jsonify({"success": False, "message": "كلمة المرور غير صحيحة"})
+        else:
+            return render_template('admin_login.html', error="كلمة المرور غير صحيحة")
 
 @app.route('/static/<path:filename>')
 def static_files(filename):
     """خدمة الملفات الثابتة بما في ذلك manifest وأيقونات PWA"""
-    return app.send_static_file(filename)
+    return send_from_directory('static', filename)
 
 # ===========================
 # API Routes
@@ -1207,4 +1220,4 @@ if __name__ == "__main__":
         port=5000, 
         debug=False,
         use_reloader=False
-)
+                            )
