@@ -1,274 +1,245 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة الإدارة - نظام التليجرام</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
-</head>
-<body>
-    <div class="container-fluid">
-        <nav class="navbar navbar-expand-lg navbar-dark bg-danger mb-4">
-            <div class="container">
-                <a class="navbar-brand" href="#">
-                    <i class="fas fa-user-shield me-2"></i>
-                    لوحة الإدارة
-                </a>
-                <div class="navbar-nav ms-auto">
-                    <a class="nav-link" href="/">
-                        <i class="fas fa-home me-1"></i>
-                        الصفحة الرئيسية
-                    </a>
-                </div>
-            </div>
-        </nav>
+// ملف JavaScript لواجهة الأدمن
+document.addEventListener('DOMContentLoaded', function() {
+    // تحديث البيانات عند التحميل
+    updateAdminData();
+    
+    // إعداد زر التحديث
+    document.getElementById('refreshBtn').addEventListener('click', updateAdminData);
+    
+    // إعداد زر مسح سجل النظام
+    document.getElementById('clearSystemLogBtn').addEventListener('click', clearSystemLog);
+    
+    // تحديث البيانات كل 10 ثواني
+    setInterval(updateAdminData, 10000);
+});
 
-        <div class="container">
-            <!-- إحصائيات عامة -->
-            <div class="row mb-4">
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-primary text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="totalUsers">{{ users|length }}</h4>
-                                    <small>إجمالي المستخدمين</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-users fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
+// تحديث بيانات الأدمن
+async function updateAdminData() {
+    try {
+        const response = await fetch('/api/admin/get_users');
+        const data = await response.json();
+        
+        if (data.success) {
+            updateUsersTable(data.users);
+            updateStats(data.users);
+        } else {
+            showToast('فشل في تحميل بيانات المستخدمين', 'error');
+        }
+    } catch (error) {
+        console.error('Error updating admin data:', error);
+        showToast('حدث خطأ في الاتصال بالخادم', 'error');
+    }
+}
+
+// تحديث جدول المستخدمين
+function updateUsersTable(users) {
+    const tableBody = document.getElementById('usersTableBody');
+    tableBody.innerHTML = '';
+    
+    if (Object.keys(users).length === 0) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="7" class="text-center text-muted">
+                    <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
+                    لا توجد مستخدمين حالياً
+                </td>
+            </tr>
+        `;
+        return;
+    }
+    
+    for (const [userId, userData] of Object.entries(users)) {
+        const row = document.createElement('tr');
+        row.setAttribute('data-user-id', userId);
+        
+        // تحديد حالة المستخدم
+        let statusBadge = '';
+        if (userData.is_running) {
+            statusBadge = '<span class="badge bg-success"><i class="fas fa-play me-1"></i>نشط</span>';
+        } else if (userData.connected) {
+            statusBadge = '<span class="badge bg-warning"><i class="fas fa-pause me-1"></i>متصل</span>';
+        } else {
+            statusBadge = '<span class="badge bg-secondary"><i class="fas fa-stop me-1"></i>غير متصل</span>';
+        }
+        
+        // تحديد نوع الإرسال
+        let sendType = 'يدوي';
+        if (userData.settings.send_type === 'scheduled') {
+            sendType = 'مجدول';
+        } else if (userData.settings.send_type === 'keyword_monitoring') {
+            sendType = 'مراقبة الكلمات';
+        }
+        
+        // عدد المجموعات
+        const groupsCount = userData.settings.groups ? userData.settings.groups.length : 0;
+        
+        // أزرار الإجراءات
+        let actionButtons = '';
+        if (userData.is_running) {
+            actionButtons = `
+                <button class="btn btn-sm btn-danger stop-user-btn" data-user-id="${userId}">
+                    <i class="fas fa-stop me-1"></i>إيقاف
+                </button>
+            `;
+        } else {
+            actionButtons = `
+                <button class="btn btn-sm btn-secondary" disabled>
+                    <i class="fas fa-pause me-1"></i>متوقف
+                </button>
+            `;
+        }
+        
+        actionButtons += `
+            <button class="btn btn-sm btn-info view-details-btn" 
+                    data-user-id="${userId}"
+                    data-bs-toggle="modal" 
+                    data-bs-target="#userDetailsModal">
+                <i class="fas fa-eye me-1"></i>عرض
+            </button>
+        `;
+        
+        row.innerHTML = `
+            <td><code>${userId.substring(0, 8)}...</code></td>
+            <td><span class="text-muted">${userData.settings.phone || 'غير محدد'}</span></td>
+            <td>${statusBadge}</td>
+            <td>
+                <small>
+                    <span class="text-success">${userData.stats.sent} مرسل</span> /
+                    <span class="text-danger">${userData.stats.errors} خطأ</span>
+                </small>
+            </td>
+            <td><span class="badge bg-info">${sendType}</span></td>
+            <td><span class="badge bg-primary">${groupsCount} مجموعة</span></td>
+            <td>${actionButtons}</td>
+        `;
+        
+        tableBody.appendChild(row);
+    }
+    
+    // إضافة معالجات الأحداث لأزرار الإيقاف
+    document.querySelectorAll('.stop-user-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const userId = this.getAttribute('data-user-id');
+            stopUser(userId);
+        });
+    });
+    
+    // إضافة معالجات الأحداث لأزرار العرض
+    document.querySelectorAll('.view-details-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const userId = this.getAttribute('data-user-id');
+            showUserDetails(userId);
+        });
+    });
+}
+
+// تحديث الإحصائيات
+function updateStats(users) {
+    // إجمالي المستخدمين
+    document.getElementById('totalUsers').textContent = Object.keys(users).length;
+    
+    // المستخدمين النشطين
+    const activeUsers = Object.values(users).filter(user => user.is_running).length;
+    document.getElementById('activeUsers').textContent = activeUsers;
+    
+    // إجمالي المرسل
+    const totalSent = Object.values(users).reduce((sum, user) => sum + user.stats.sent, 0);
+    document.getElementById('totalSent').textContent = totalSent;
+    
+    // إجمالي الأخطاء
+    const totalErrors = Object.values(users).reduce((sum, user) => sum + user.stats.errors, 0);
+    document.getElementById('totalErrors').textContent = totalErrors;
+}
+
+// إيقاف مستخدم
+async function stopUser(userId) {
+    try {
+        const response = await fetch(`/api/admin/stop_user/${userId}`, {
+            method: 'POST'
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast(data.message, 'success');
+            updateAdminData(); // تحديث البيانات
+        } else {
+            showToast(data.message, 'error');
+        }
+    } catch (error) {
+        console.error('Error stopping user:', error);
+        showToast('حدث خطأ في إيقاف المستخدم', 'error');
+    }
+}
+
+// عرض تفاصيل المستخدم
+async function showUserDetails(userId) {
+    try {
+        const response = await fetch('/api/admin/get_users');
+        const data = await response.json();
+        
+        if (data.success && data.users[userId]) {
+            const userData = data.users[userId];
+            const modalContent = document.getElementById('userDetailsContent');
+            
+            modalContent.innerHTML = `
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>معلومات المستخدم</h6>
+                        <p><strong>ID:</strong> <code>${userId}</code></p>
+                        <p><strong>رقم الهاتف:</strong> ${userData.settings.phone || 'غير محدد'}</p>
+                        <p><strong>الحالة:</strong> ${userData.is_running ? 'نشط' : 'متوقف'}</p>
+                        <p><strong>متصل:</strong> ${userData.connected ? 'نعم' : 'لا'}</p>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>الإحصائيات</h6>
+                        <p><strong>تم الإرسال:</strong> ${userData.stats.sent}</p>
+                        <p><strong>الأخطاء:</strong> ${userData.stats.errors}</p>
                     </div>
                 </div>
-
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-success text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="activeUsers">
-                                        {% set active_count = users.values() | selectattr('is_running') | list | length %}
-                                        {{ active_count }}
-                                    </h4>
-                                    <small>المستخدمين النشطين</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-play-circle fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
+                <div class="row mt-3">
+                    <div class="col-12">
+                        <h6>الإعدادات</h6>
+                        <pre>${JSON.stringify(userData.settings, null, 2)}</pre>
                     </div>
                 </div>
+            `;
+        } else {
+            showToast('فشل في تحميل تفاصيل المستخدم', 'error');
+        }
+    } catch (error) {
+        console.error('Error loading user details:', error);
+        showToast('حدث خطأ في تحميل تفاصيل المستخدم', 'error');
+    }
+}
 
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-info text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="totalSent">
-                                        {% set total_sent = users.values() | sum(attribute='stats.sent') %}
-                                        {{ total_sent }}
-                                    </h4>
-                                    <small>إجمالي المرسل</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-paper-plane fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+// مسح سجل النظام
+async function clearSystemLog() {
+    const logContainer = document.getElementById('systemLogContainer');
+    logContainer.innerHTML = '<div class="text-muted">سجل النظام جاهز...</div>';
+    showToast('تم مسح سجل النظام', 'success');
+}
 
-                <div class="col-lg-3 col-md-6 mb-3">
-                    <div class="card bg-warning text-white">
-                        <div class="card-body">
-                            <div class="d-flex align-items-center">
-                                <div class="flex-grow-1">
-                                    <h4 id="totalErrors">
-                                        {% set total_errors = users.values() | sum(attribute='stats.errors') %}
-                                        {{ total_errors }}
-                                    </h4>
-                                    <small>إجمالي الأخطاء</small>
-                                </div>
-                                <div class="ms-3">
-                                    <i class="fas fa-exclamation-triangle fa-2x"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- جدول المستخدمين -->
-            <div class="card">
-                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">
-                        <i class="fas fa-table me-2"></i>
-                        إدارة المستخدمين
-                    </h5>
-                    <button class="btn btn-outline-light btn-sm" id="refreshBtn">
-                        <i class="fas fa-sync me-1"></i>
-                        تحديث
-                    </button>
-                </div>
-                <div class="card-body">
-                    <div class="table-responsive">
-                        <table class="table table-striped table-hover">
-                            <thead class="table-dark">
-                                <tr>
-                                    <th>ID المستخدم</th>
-                                    <th>رقم الهاتف</th>
-                                    <th>الحالة</th>
-                                    <th>الإحصائيات</th>
-                                    <th>نوع الإرسال</th>
-                                    <th>المجموعات</th>
-                                    <th>الإجراءات</th>
-                                </tr>
-                            </thead>
-                            <tbody id="usersTableBody">
-                                {% for user_id, user_data in users.items() %}
-                                <tr data-user-id="{{ user_id }}">
-                                    <td>
-                                        <code>{{ user_id[:8] }}...</code>
-                                    </td>
-                                    <td>
-                                        <span class="text-muted">{{ user_data.settings.phone or 'غير محدد' }}</span>
-                                    </td>
-                                    <td>
-                                        {% if user_data.is_running %}
-                                            <span class="badge bg-success">
-                                                <i class="fas fa-play me-1"></i>نشط
-                                            </span>
-                                        {% elif user_data.connected %}
-                                            <span class="badge bg-warning">
-                                                <i class="fas fa-pause me-1"></i>متصل
-                                            </span>
-                                        {% else %}
-                                            <span class="badge bg-secondary">
-                                                <i class="fas fa-stop me-1"></i>غير متصل
-                                            </span>
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        <small>
-                                            <span class="text-success">{{ user_data.stats.sent }} مرسل</span> /
-                                            <span class="text-danger">{{ user_data.stats.errors }} خطأ</span>
-                                        </small>
-                                    </td>
-                                    <td>
-                                        <span class="badge bg-info">
-                                            {% if user_data.settings.send_type == 'scheduled' %}
-                                                مجدول
-                                            {% elif user_data.settings.send_type == 'keyword_monitoring' %}
-                                                مراقبة الكلمات
-                                            {% else %}
-                                                يدوي
-                                            {% endif %}
-                                        </span>
-                                    </td>
-                                    <td>
-                                        <span class="badge bg-primary">
-                                            {{ user_data.settings.groups|length if user_data.settings.groups else 0 }} مجموعة
-                                        </span>
-                                    </td>
-                                    <td>
-                                        {% if user_data.is_running %}
-                                            <button class="btn btn-sm btn-danger stop-user-btn" data-user-id="{{ user_id }}">
-                                                <i class="fas fa-stop me-1"></i>إيقاف
-                                            </button>
-                                        {% else %}
-                                            <button class="btn btn-sm btn-secondary" disabled>
-                                                <i class="fas fa-pause me-1"></i>متوقف
-                                            </button>
-                                        {% endif %}
-                                        
-                                        <button class="btn btn-sm btn-info view-details-btn" 
-                                                data-user-id="{{ user_id }}"
-                                                data-bs-toggle="modal" 
-                                                data-bs-target="#userDetailsModal">
-                                            <i class="fas fa-eye me-1"></i>عرض
-                                        </button>
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                                
-                                {% if not users %}
-                                <tr>
-                                    <td colspan="7" class="text-center text-muted">
-                                        <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
-                                        لا توجد مستخدمين حالياً
-                                    </td>
-                                </tr>
-                                {% endif %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <!-- سجل النظام -->
-            <div class="row mt-4">
-                <div class="col-12">
-                    <div class="card">
-                        <div class="card-header bg-secondary text-white d-flex justify-content-between">
-                            <h5 class="mb-0">
-                                <i class="fas fa-clipboard-list me-2"></i>
-                                سجل النظام
-                            </h5>
-                            <button class="btn btn-sm btn-outline-light" id="clearSystemLogBtn">
-                                <i class="fas fa-trash me-1"></i>
-                                مسح السجل
-                            </button>
-                        </div>
-                        <div class="card-body">
-                            <div id="systemLogContainer" class="log-container">
-                                <div class="text-muted">سجل النظام جاهز...</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal تفاصيل المستخدم -->
-    <div class="modal fade" id="userDetailsModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">تفاصيل المستخدم</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body" id="userDetailsContent">
-                    <!-- سيتم تحميل تفاصيل المستخدم هنا -->
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إغلاق</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Toast Notifications -->
-    <div class="toast-container position-fixed bottom-0 end-0 p-3">
-        <div id="toast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
-            <div class="toast-header">
-                <strong class="me-auto">إشعار الإدارة</strong>
-                <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
-            </div>
-            <div class="toast-body" id="toastBody">
-                
-            </div>
-        </div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        const users = {{ users|tojson }};
-    </script>
-    <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
-</body>
-</html>
+// عرض إشعار
+function showToast(message, type = 'info') {
+    const toast = document.getElementById('toast');
+    const toastBody = document.getElementById('toastBody');
+    
+    // تحديد لون التوست بناءً على النوع
+    if (type === 'error') {
+        toast.classList.remove('bg-primary', 'bg-success');
+        toast.classList.add('bg-danger');
+    } else if (type === 'success') {
+        toast.classList.remove('bg-primary', 'bg-danger');
+        toast.classList.add('bg-success');
+    } else {
+        toast.classList.remove('bg-success', 'bg-danger');
+        toast.classList.add('bg-primary');
+    }
+    
+    toastBody.textContent = message;
+    
+    // عرض التوست
+    const bsToast = new bootstrap.Toast(toast);
+    bsToast.show();
+}
